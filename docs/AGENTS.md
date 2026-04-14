@@ -89,7 +89,7 @@ JetBrains IDE terminology (Chinese UI translations):
 | --- | --- |
 | AI Chat | AI 聊天 |
 | Registry | 注册表 |
-| Configure ACP agents | (未翻译) |
+| Configure ACP agents | Configure ACP agents |
 
 ## Typography
 
