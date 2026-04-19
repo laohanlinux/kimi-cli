@@ -1,0 +1,5 @@
+{"type":"step_begin","n":2}
+{"type":"step_interrupted","reason":"user_cancelled"}
+{"type":"status_update","token_count":1,"context_size":500,"plan_mode":true,"mcp_status":"idle"}
+{"type":"tool_call","id":"tc-golden","function":{"name":"noop","arguments":"{}"}}
+{"type":"text_part","text":"fixture tail"}

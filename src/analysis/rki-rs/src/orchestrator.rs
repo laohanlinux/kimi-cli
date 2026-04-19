@@ -1,0 +1,1525 @@
+//! Turn orchestrators: swappable agent-loop strategies.
+//!
+//! - `ReActOrchestrator` — standard reasoning + action loop
+//! - `PlanModeOrchestrator` — read-only research mode
+//! - `RalphOrchestrator` — automated iteration with decision gate
+
+use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use crate::agent::Agent;
+use crate::context::Context;
+use crate::feature_flags::{ExperimentalFeature, FeatureFlags};
+use crate::hooks::HookStage;
+use crate::llm::{self, ChatProvider};
+use crate::message::{merge_adjacent_user_messages, ContentPart, Message, UserMessage};
+use crate::turn_input::TurnInput;
+use crate::notification::NotificationManager;
+use crate::runtime::Runtime;
+use crate::soul::BackToTheFuture;
+use crate::token::ContextToken;
+use crate::tools::ToolContext;
+use crate::wire::{RootWireHub, WireEvent};
+
+#[derive(Debug)]
+pub struct TurnResult {
+    pub stop_reason: String,
+}
+
+/// §8.4: fan out notification tail to the wire hub for offset consumer `"wire"`.
+pub(crate) async fn deliver_wire_offset_tail(
+    notifications: &NotificationManager,
+    hub: &RootWireHub,
+) -> anyhow::Result<()> {
+    let wire_tail = notifications.read_since_persisted_offset("wire", 50).await?;
+    let mut last_id: Option<String> = None;
+    for notif in &wire_tail {
+        hub.broadcast(WireEvent::Notification {
+            category: notif.category.clone(),
+            kind: notif.kind.clone(),
+            severity: notif.severity.clone(),
+            payload: notif.payload.clone(),
+        });
+        last_id = notif.dedupe_key.clone();
+    }
+    if let Some(ref lid) = last_id {
+        notifications.advance_consumer_offset("wire", lid).await?;
+    }
+    Ok(())
+}
+
+/// §7.2: when `FunctionTools` is enabled, annotate each tool JSON schema for providers that understand function-style tools.
+pub(crate) fn apply_function_tool_schema_tags(features: &FeatureFlags, tools: &mut [serde_json::Value]) {
+    if !features.is_enabled(ExperimentalFeature::FunctionTools) {
+        return;
+    }
+    for schema in tools.iter_mut() {
+        if let Some(obj) = schema.as_object_mut() {
+            obj.insert(
+                "x-rki-tool-contract".to_string(),
+                serde_json::json!("v1-function-tools"),
+            );
+        }
+    }
+}
+
+/// Stateful loop protocol extracted from KimiSoul.
+/// Orchestrators are composable and swappable mid-session.
+#[async_trait]
+pub trait TurnOrchestrator: Send + Sync {
+    fn name(&self) -> &'static str;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_turn(
+        &self,
+        agent: &Agent,
+        context: Arc<Mutex<Context>>,
+        llm: Arc<dyn ChatProvider>,
+        runtime: &Runtime,
+        turn: TurnInput,
+        hub: &RootWireHub,
+        token: ContextToken,
+    ) -> anyhow::Result<TurnResult>;
+}
+
+/// Default ReAct orchestrator: step loop with compaction, D-Mail, tools.
+pub struct ReActOrchestrator;
+
+#[async_trait]
+impl TurnOrchestrator for ReActOrchestrator {
+    fn name(&self) -> &'static str { "react" }
+
+    async fn execute_turn(
+        &self,
+        agent: &Agent,
+        context: Arc<Mutex<Context>>,
+        llm: Arc<dyn ChatProvider>,
+        runtime: &Runtime,
+        turn: TurnInput,
+        hub: &RootWireHub,
+        token: ContextToken,
+    ) -> anyhow::Result<TurnResult> {
+        let mut ctx = context.lock().await;
+        let checkpoint_id = ctx.write_checkpoint().await?;
+        let user_msg = Message::User(UserMessage::from_parts(turn.parts.clone()));
+        ctx.append(user_msg).await?;
+        drop(ctx);
+
+        let stop_reason = Self::_agent_loop(agent, context, llm, runtime, hub, checkpoint_id, token).await?;
+        Ok(TurnResult { stop_reason })
+    }
+}
+
+impl ReActOrchestrator {
+    async fn _agent_loop(
+        agent: &Agent,
+        context: Arc<Mutex<Context>>,
+        llm: Arc<dyn ChatProvider>,
+        runtime: &Runtime,
+        hub: &RootWireHub,
+        checkpoint_id: u64,
+        token: ContextToken,
+    ) -> anyhow::Result<String> {
+        let max_steps = runtime.config.read().await.max_steps_per_turn.unwrap_or(100);
+        for step in 1..=max_steps {
+            hub.broadcast(WireEvent::StepBegin { n: step });
+            let step_token = token.child_step(format!("{}", step));
+            match Self::_step(agent, context.clone(), llm.clone(), runtime, hub, checkpoint_id, step_token).await {
+                Ok(has_tool_calls) => {
+                    if !has_tool_calls {
+                        return Ok("no_tool_calls".to_string());
+                    }
+                }
+                Err(e) => {
+                    if let Some(bttf) = e.downcast_ref::<BackToTheFuture>() {
+                        let mut ctx = context.lock().await;
+                        ctx.revert_to(bttf.checkpoint_id).await?;
+                        for msg in &bttf.messages {
+                            ctx.append(msg.clone()).await?;
+                        }
+                        drop(ctx);
+                        hub.broadcast(WireEvent::StepInterrupted {
+                            reason: "dmail_revert".to_string(),
+                        });
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok("max_steps".to_string())
+    }
+
+    async fn _step(
+        agent: &Agent,
+        context: Arc<Mutex<Context>>,
+        llm: Arc<dyn ChatProvider>,
+        runtime: &Runtime,
+        hub: &RootWireHub,
+        checkpoint_id: u64,
+        token: ContextToken,
+    ) -> anyhow::Result<bool> {
+        let config = runtime.config.read().await;
+        let max_context = config.max_context_size.unwrap_or(128_000);
+        let threshold_percent = config.compaction_threshold_percent;
+        let threshold_absolute = config.compaction_threshold_absolute;
+        let min_messages = config.compaction_min_messages;
+        drop(config);
+
+        // Sync compaction policy with runtime config
+        {
+            let mut ctx = context.lock().await;
+            ctx.set_compaction_config(min_messages);
+        }
+
+        let token_count = {
+            let ctx = context.lock().await;
+            ctx.token_count()
+        };
+
+        // Auto-compaction check (config-driven thresholds)
+        if token_count >= (max_context as f64 * threshold_percent) as usize
+            || token_count + threshold_absolute >= max_context
+        {
+            hub.broadcast(WireEvent::CompactionBegin);
+            let mut ctx = context.lock().await;
+            ctx.compact(Some(llm.clone())).await?;
+            drop(ctx);
+            hub.broadcast(WireEvent::CompactionEnd);
+        }
+
+        let _ = deliver_wire_offset_tail(&runtime.notifications, hub).await;
+
+        // Notification delivery (exactly-once via claim+ack)
+        let notifications = runtime.notifications.claim("llm").await;
+        if !notifications.is_empty() {
+            let mut ctx = context.lock().await;
+            for notif in &notifications {
+                let text = format!(
+                    "[Notification: {} {}] {}",
+                    notif.category, notif.severity, notif.kind
+                );
+                ctx.append(Message::User(UserMessage::text(text))).await?;
+            }
+            drop(ctx);
+            // Ack after successful delivery to context
+            for notif in &notifications {
+                if let Some(ref id) = notif.dedupe_key {
+                    runtime.notifications.ack("llm", id).await.ok();
+                }
+            }
+        }
+
+        // Dynamic injection: plan mode, YOLO, etc.
+        let injections = runtime.injection.collect(runtime).await;
+        if !injections.is_empty() {
+            let mut ctx = context.lock().await;
+            for msg in injections {
+                ctx.append(msg).await?;
+            }
+            drop(ctx);
+        }
+
+        // Build LLM history after notifications + injections (§1.2 Phase D–E ordering).
+        let history = {
+            let ctx = context.lock().await;
+            let recall_query = ctx
+                .history()
+                .iter()
+                .rev()
+                .find_map(|m| match m {
+                    Message::User(u) => Some(u.flatten_for_recall()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let h = if runtime.features.is_enabled(ExperimentalFeature::MemoryHierarchy) {
+                ctx.history_with_recall(&recall_query, 5)
+            } else {
+                ctx.history()
+            };
+            merge_adjacent_user_messages(h)
+        };
+        let system_prompt = Some(agent.system_prompt.clone());
+        let mut tools = runtime.toolset.lock().await.schemas();
+        apply_function_tool_schema_tags(&runtime.features, &mut tools);
+
+        let retry_config = llm::RetryConfig::default();
+        let llm_clone = llm.clone();
+        let mut generation = llm::with_retry(&retry_config, move || {
+            let llm = llm_clone.clone();
+            let system_prompt = system_prompt.clone();
+            let history = history.clone();
+            let tools = tools.clone();
+            async move {
+                llm.generate(system_prompt, history, tools).await
+            }
+        }).await?;
+        let pull_backpressure = runtime
+            .features
+            .is_enabled(ExperimentalFeature::PullGeneration);
+        while let Some(chunk) = generation.next_chunk().await {
+            let event = match chunk {
+                ContentPart::Text { text } => WireEvent::TextPart { text },
+                ContentPart::Think { text } => WireEvent::ThinkPart { text },
+                ContentPart::ImageUrl { url } => WireEvent::ImageUrlPart { url },
+                ContentPart::AudioUrl { url } => WireEvent::AudioUrlPart { url },
+                ContentPart::VideoUrl { url } => WireEvent::VideoUrlPart { url },
+            };
+            hub.broadcast(event);
+            if pull_backpressure {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let tool_calls = generation.tool_calls().await;
+        let has_tool_calls = !tool_calls.is_empty();
+
+        if has_tool_calls {
+            for tc in &tool_calls {
+                hub.broadcast(WireEvent::ToolCall {
+                    id: tc.id.clone(),
+                    function: tc.function.clone(),
+                });
+                let args: serde_json::Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
+
+                // Pre-validate hook
+                let validate_payload = serde_json::json!({
+                    "tool": tc.function.name,
+                    "args": &args,
+                    "tool_call_id": &tc.id,
+                });
+                let validate_result = runtime.hooks.run(
+                    HookStage::PreValidate,
+                    "tool_call",
+                    &validate_payload,
+                ).await?;
+                if let crate::hooks::EffectDecision::Block { reason } = validate_result.decision {
+                    hub.broadcast(WireEvent::ToolResult {
+                        tool_call_id: tc.id.clone(),
+                        output: format!("Blocked by hook: {}", reason),
+                        is_error: true,
+                        elapsed_ms: None,
+                    });
+                    let mut ctx = context.lock().await;
+                    ctx.append(Message::ToolEvent(crate::message::ToolEvent {
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.function.name.clone(),
+                        status: crate::message::ToolStatus::Failed,
+                        content: vec![crate::message::ContentBlock::Text { text: format!("Blocked by hook: {}", reason) }],
+                        metrics: None,
+                        elapsed_ms: None,
+                    })).await?;
+                    continue;
+                }
+
+                // Pre-execute hook
+                let pre_payload = serde_json::json!({
+                    "tool": tc.function.name,
+                    "args": &args,
+                    "tool_call_id": &tc.id,
+                });
+                let pre_exec = runtime
+                    .hooks
+                    .run(HookStage::PreExecute, "tool_call", &pre_payload)
+                    .await?;
+                if runtime
+                    .features
+                    .is_enabled(ExperimentalFeature::StructuredEffects)
+                {
+                    if let crate::hooks::EffectDecision::Block { reason } = &pre_exec.decision {
+                        hub.broadcast(WireEvent::ToolResult {
+                            tool_call_id: tc.id.clone(),
+                            output: format!("Blocked by hook: {}", reason),
+                            is_error: true,
+                            elapsed_ms: None,
+                        });
+                        let mut ctx = context.lock().await;
+                        ctx.append(Message::ToolEvent(crate::message::ToolEvent {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            status: crate::message::ToolStatus::Failed,
+                            content: vec![crate::message::ContentBlock::Text {
+                                text: format!("Blocked by hook: {}", reason),
+                            }],
+                            metrics: None,
+                            elapsed_ms: None,
+                        }))
+                        .await?;
+                        drop(ctx);
+                        continue;
+                    }
+                }
+
+                let toolset = runtime.toolset.lock().await;
+                let tool_ctx = ToolContext {
+                    runtime: runtime.clone(),
+                    hub: Some(hub.clone()),
+                    token: token.child_tool_call(tc.id.clone()),
+                };
+                let start = std::time::Instant::now();
+                let tool_result = toolset.handle(&tc.function.name, args.clone(), &tool_ctx).await;
+                let elapsed = start.elapsed().as_millis() as u64;
+                drop(toolset);
+
+                match &tool_result {
+                    Ok(output) => {
+                        // Wire display: text summary for UI compatibility
+                        let display_text = crate::message::content_to_string(&output.result.content);
+                        hub.broadcast(WireEvent::ToolResult {
+                            tool_call_id: tc.id.clone(),
+                            output: display_text,
+                            is_error: false,
+                            elapsed_ms: Some(elapsed),
+                        });
+                        // Context storage: native ToolEvent with rich metadata (§6.4)
+                        let mut ctx = context.lock().await;
+                        ctx.append(Message::ToolEvent(crate::message::ToolEvent {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            status: crate::message::ToolStatus::Completed,
+                            content: output.result.content.clone(),
+                            metrics: Some(output.metrics.clone()),
+                            elapsed_ms: Some(elapsed),
+                        })).await?;
+
+                        // Post-execute hook
+                        let post_payload = serde_json::json!({
+                            "tool": tc.function.name,
+                            "args": &args,
+                            "tool_call_id": &tc.id,
+                            "result": "success",
+                        });
+                        let _ = runtime.hooks.run(HookStage::PostExecute, "tool_call", &post_payload).await?;
+                    }
+                    Err(e) => {
+                        hub.broadcast(WireEvent::ToolResult {
+                            tool_call_id: tc.id.clone(),
+                            output: e.to_string(),
+                            is_error: true,
+                            elapsed_ms: Some(elapsed),
+                        });
+                        let mut ctx = context.lock().await;
+                        ctx.append(Message::ToolEvent(crate::message::ToolEvent {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            status: crate::message::ToolStatus::Failed,
+                            content: vec![crate::message::ContentBlock::Text { text: e.to_string() }],
+                            metrics: None,
+                            elapsed_ms: Some(elapsed),
+                        })).await?;
+
+                        // Post-execute failure hook
+                        let post_payload = serde_json::json!({
+                            "tool": tc.function.name,
+                            "args": &args,
+                            "tool_call_id": &tc.id,
+                            "result": "error",
+                            "error": e.to_string(),
+                        });
+                        let _ = runtime.hooks.run(HookStage::PostExecuteFailure, "tool_call", &post_payload).await?;
+                    }
+                }
+
+                // Audit hook
+                let audit_payload = serde_json::json!({
+                    "tool": tc.function.name,
+                    "args": &args,
+                    "tool_call_id": &tc.id,
+                    "result": if tool_result.is_ok() { "success" } else { "error" },
+                });
+                let _ = runtime.hooks.run(HookStage::Audit, "tool_call", &audit_payload).await?;
+            }
+        }
+
+        // Emit status update after every step (plan_mode reflects runtime, e.g. after enter_plan_mode tool)
+        let ctx = context.lock().await;
+        let token_count = ctx.token_count();
+        drop(ctx);
+        let plan_mode = runtime.is_plan_mode().await;
+        hub.broadcast(WireEvent::StatusUpdate {
+            token_count,
+            context_size: max_context,
+            plan_mode,
+            mcp_status: "connected".to_string(),
+        });
+
+        // Steer consumption: inject queued user messages
+        let steers = runtime.steer_queue.drain().await;
+        if !steers.is_empty() {
+            let mut ctx = context.lock().await;
+            for steer in steers {
+                ctx.append(Message::User(UserMessage::text(steer))).await?;
+            }
+            drop(ctx);
+            hub.broadcast(WireEvent::SteerInput {
+                content: "steer injected".to_string(),
+            });
+            return Ok(true); // continue to next step
+        }
+
+        // D-Mail check
+        if let Some((target_cp, messages)) = runtime.denwa_renji.claim().await {
+            let effective_cp = if target_cp == 0 { checkpoint_id } else { target_cp };
+            return Err(anyhow::Error::from(BackToTheFuture {
+                checkpoint_id: effective_cp,
+                messages,
+            }));
+        }
+
+        Ok(has_tool_calls)
+    }
+}
+
+/// Plan mode orchestrator: read-only research, single step, no tools, no compaction.
+pub struct PlanModeOrchestrator;
+
+#[async_trait]
+impl TurnOrchestrator for PlanModeOrchestrator {
+    fn name(&self) -> &'static str { "plan" }
+
+    async fn execute_turn(
+        &self,
+        agent: &Agent,
+        context: Arc<Mutex<Context>>,
+        llm: Arc<dyn ChatProvider>,
+        runtime: &Runtime,
+        turn: TurnInput,
+        hub: &RootWireHub,
+        _token: ContextToken,
+    ) -> anyhow::Result<TurnResult> {
+        let mut ctx = context.lock().await;
+        let _checkpoint_id = ctx.write_checkpoint().await?;
+        let user_msg = Message::User(UserMessage::from_parts(turn.parts.clone()));
+        ctx.append(user_msg).await?;
+        let history = merge_adjacent_user_messages(ctx.history());
+        let system_prompt = Some(format!("{}\n\n[PLAN MODE] You are in read-only research mode. Do not use tools. Think step by step and present a plan.", agent.system_prompt));
+        drop(ctx);
+
+        let _ = deliver_wire_offset_tail(&runtime.notifications, hub).await;
+
+        hub.broadcast(WireEvent::StepBegin { n: 1 });
+        hub.broadcast(WireEvent::PlanDisplay {
+            content: "Plan mode active. Analyzing without tools...".to_string(),
+        });
+
+        let mut generation = llm.generate(system_prompt, history, vec![]).await?;
+        let pull_backpressure = runtime
+            .features
+            .is_enabled(ExperimentalFeature::PullGeneration);
+        while let Some(chunk) = generation.next_chunk().await {
+            let event = match chunk {
+                ContentPart::Text { text } => WireEvent::TextPart { text },
+                ContentPart::Think { text } => WireEvent::ThinkPart { text },
+                ContentPart::ImageUrl { url } => WireEvent::ImageUrlPart { url },
+                ContentPart::AudioUrl { url } => WireEvent::AudioUrlPart { url },
+                ContentPart::VideoUrl { url } => WireEvent::VideoUrlPart { url },
+            };
+            hub.broadcast(event);
+            if pull_backpressure {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Plan mode ignores tool calls — they shouldn't happen since we pass empty tools list
+        let tool_calls = generation.tool_calls().await;
+        if !tool_calls.is_empty() {
+            hub.broadcast(WireEvent::StepInterrupted {
+                reason: "plan_mode_ignores_tool_calls".to_string(),
+            });
+        }
+
+        let mut ctx = context.lock().await;
+        ctx.write_checkpoint().await?;
+        drop(ctx);
+
+        // D-Mail check (plan mode can still receive time-travel messages)
+        // We don't check denwa_renji here; plan mode is intentionally simple.
+
+        Ok(TurnResult {
+            stop_reason: "plan_mode_complete".to_string(),
+        })
+    }
+}
+
+/// Ralph orchestrator: automated iteration with decision gate (§5.4 deviation).
+/// Wraps ReActOrchestrator in a loop. After each turn, asks the LLM whether
+/// to continue or stop. Max iterations configurable.
+pub struct RalphOrchestrator {
+    max_iterations: usize,
+    inner: ReActOrchestrator,
+}
+
+impl RalphOrchestrator {
+    pub fn new(max_iterations: usize) -> Self {
+        Self {
+            max_iterations,
+            inner: ReActOrchestrator,
+        }
+    }
+
+    /// Decision gate: ask the LLM whether to continue iterating or stop.
+    /// Returns true if the LLM says to stop.
+    async fn should_stop(
+        &self,
+        llm: Arc<dyn ChatProvider>,
+        stop_reason: &str,
+        iteration: usize,
+        hub: &RootWireHub,
+    ) -> anyhow::Result<bool> {
+        let decision_prompt = format!(
+            "[RALPH DECISION] You are an automated iteration controller. \
+The agent just completed iteration {} with stop_reason='{}'. \
+Should the agent continue working or stop? \
+Respond with exactly one word: STOP or CONTINUE.",
+            iteration, stop_reason
+        );
+
+        let mut generation = llm.generate(
+            Some(decision_prompt),
+            vec![],
+            vec![],
+        ).await?;
+
+        let mut response = String::new();
+        while let Some(chunk) = generation.next_chunk().await {
+            if let ContentPart::Text { text } = chunk {
+                response.push_str(&text);
+            }
+        }
+
+        let trimmed = response.trim().to_uppercase();
+        let stop = trimmed.contains("STOP");
+
+        hub.broadcast(WireEvent::TextPart {
+            text: format!("[Ralph decision: {}]\n", if stop { "STOP" } else { "CONTINUE" }),
+        });
+
+        Ok(stop)
+    }
+}
+
+#[async_trait]
+impl TurnOrchestrator for RalphOrchestrator {
+    fn name(&self) -> &'static str { "ralph" }
+
+    async fn execute_turn(
+        &self,
+        agent: &Agent,
+        context: Arc<Mutex<Context>>,
+        llm: Arc<dyn ChatProvider>,
+        runtime: &Runtime,
+        turn: TurnInput,
+        hub: &RootWireHub,
+        token: ContextToken,
+    ) -> anyhow::Result<TurnResult> {
+        hub.broadcast(WireEvent::TextPart {
+            text: "[Ralph mode: starting automated iteration]\n".to_string(),
+        });
+
+        for iteration in 1..=self.max_iterations {
+            hub.broadcast(WireEvent::TextPart {
+                text: format!("\n--- Ralph iteration {} ---\n", iteration),
+            });
+
+            let turn_token = token.child_step(format!("ralph-{}", iteration));
+            let turn_in = if iteration == 1 {
+                turn.clone()
+            } else {
+                TurnInput::text("continue")
+            };
+            let turn_result = self
+                .inner
+                .execute_turn(
+                    agent,
+                    context.clone(),
+                    llm.clone(),
+                    runtime,
+                    turn_in,
+                    hub,
+                    turn_token,
+                )
+                .await?;
+
+            // Decision gate: ask LLM if we should continue
+            if iteration >= self.max_iterations {
+                hub.broadcast(WireEvent::TextPart {
+                    text: "[Ralph: max iterations reached]\n".to_string(),
+                });
+                return Ok(TurnResult {
+                    stop_reason: format!("ralph_max_iterations:{}", self.max_iterations),
+                });
+            }
+
+            // Heuristic fast-path: if no tool calls, we're likely done
+            if turn_result.stop_reason == "no_tool_calls" {
+                hub.broadcast(WireEvent::TextPart {
+                    text: "[Ralph: no tool calls, stopping]\n".to_string(),
+                });
+                return Ok(TurnResult {
+                    stop_reason: "ralph_complete".to_string(),
+                });
+            }
+
+            // LLM decision gate for other stop reasons
+            match self.should_stop(llm.clone(), &turn_result.stop_reason, iteration, hub).await {
+                Ok(true) => {
+                    return Ok(TurnResult {
+                        stop_reason: format!("ralph_decided_stop:{}:", turn_result.stop_reason),
+                    });
+                }
+                Ok(false) => continue,
+                Err(e) => {
+                    hub.broadcast(WireEvent::StepInterrupted {
+                        reason: format!("ralph_decision_error: {}", e),
+                    });
+                    // On decision error, fall back to heuristic
+                    if turn_result.stop_reason != "max_steps" {
+                        return Ok(TurnResult {
+                            stop_reason: format!("ralph_fallback:{}", turn_result.stop_reason),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(TurnResult {
+            stop_reason: "ralph_max_iterations".to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{Agent, AgentSpec};
+    use crate::approval::ApprovalRuntime;
+    use crate::config::Config;
+    use crate::feature_flags::{ExperimentalFeature, FeatureFlags};
+    use crate::hooks::{HookStage, SideEffect, SideEffectResult};
+    use crate::llm::{ChatProvider, EchoProvider, HttpGeneration, ScriptedProvider};
+    use crate::message::{FunctionCall, ToolCall};
+    use crate::notification::types::NotificationEvent;
+    use crate::session::Session;
+    use crate::store::Store;
+
+    #[test]
+    fn test_apply_function_tool_schema_tags_only_when_flag_on() {
+        let mut flags = FeatureFlags::default();
+        let mut tools = vec![serde_json::json!({"type": "object", "properties": {}})];
+        apply_function_tool_schema_tags(&flags, &mut tools);
+        assert!(!tools[0].as_object().unwrap().contains_key("x-rki-tool-contract"));
+
+        flags.enable(ExperimentalFeature::FunctionTools);
+        apply_function_tool_schema_tags(&flags, &mut tools);
+        assert_eq!(tools[0]["x-rki-tool-contract"], "v1-function-tools");
+    }
+
+    fn test_runtime() -> Runtime {
+        test_runtime_with_features(FeatureFlags::default())
+    }
+
+    fn test_runtime_with_features(features: FeatureFlags) -> Runtime {
+        let hub = RootWireHub::new();
+        let approval = Arc::new(ApprovalRuntime::new(hub.clone(), true, vec![]));
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let session = Session::create(&store, std::env::current_dir().unwrap()).unwrap();
+        Runtime::with_features(
+            Config {
+                max_steps_per_turn: Some(10),
+                max_context_size: Some(128_000),
+                ..Config::default()
+            },
+            session,
+            approval,
+            hub,
+            store,
+            features,
+        )
+    }
+
+    /// Captures the last `history` passed into `generate` (for flag gating tests).
+    struct HistoryCapture {
+        last_history: Arc<tokio::sync::Mutex<Vec<Message>>>,
+    }
+
+    #[async_trait]
+    impl ChatProvider for HistoryCapture {
+        async fn generate(
+            &self,
+            system_prompt: Option<String>,
+            history: Vec<Message>,
+            tools: Vec<serde_json::Value>,
+        ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+            *self.last_history.lock().await = history.clone();
+            let echo = EchoProvider;
+            echo.generate(system_prompt, history, tools).await
+        }
+    }
+
+    async fn seed_context_for_memory_recall_test(context: &Arc<Mutex<Context>>) {
+        let mut ctx = context.lock().await;
+        ctx.append(Message::User(UserMessage::text(
+            "Earlier we discussed oauth hardening",
+        )))
+        .await
+        .unwrap();
+        ctx.append(Message::Assistant {
+            content: Some("ack".to_string()),
+            tool_calls: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memory_recall_suppressed_without_experimental_flag() {
+        let runtime = test_runtime_with_features(FeatureFlags::default());
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        seed_context_for_memory_recall_test(&context).await;
+
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let llm: Arc<dyn ChatProvider> = Arc::new(HistoryCapture {
+            last_history: captured.clone(),
+        });
+        let hub = RootWireHub::new();
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("any follow-up"), &hub, token)
+            .await
+            .unwrap();
+
+        let hist = captured.lock().await;
+        let joined: String = hist.iter().map(|m| format!("{m:?}")).collect();
+        assert!(
+            !joined.contains("Relevant context from memory"),
+            "expected no recall injection without KIMI_EXPERIMENTAL_MEMORY_HIERARCHY, got {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_recall_injected_with_experimental_flag() {
+        let mut features = FeatureFlags::default();
+        features.enable(ExperimentalFeature::MemoryHierarchy);
+        let runtime = test_runtime_with_features(features);
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        seed_context_for_memory_recall_test(&context).await;
+
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::<Message>::new()));
+        let llm: Arc<dyn ChatProvider> = Arc::new(HistoryCapture {
+            last_history: captured.clone(),
+        });
+        let hub = RootWireHub::new();
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("any follow-up"), &hub, token)
+            .await
+            .unwrap();
+
+        let hist = captured.lock().await;
+        let joined: String = hist.iter().map(|m| format!("{m:?}")).collect();
+        assert!(
+            joined.contains("Relevant context from memory"),
+            "expected recall injection with KIMI_EXPERIMENTAL_MEMORY_HIERARCHY, got {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_react_orchestrator_echo() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await;
+
+        assert!(result.is_ok());
+        let turn_result = result.unwrap();
+        assert_eq!(turn_result.stop_reason, "no_tool_calls");
+
+        // Verify hub events (TurnBegin/TurnEnd are sent by KimiSoul, not orchestrator)
+        let mut events = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let has_step = events.iter().any(|e| matches!(e, WireEvent::StepBegin { .. }));
+        let has_text = events.iter().any(|e| matches!(e, WireEvent::TextPart { .. }));
+        let has_status = events.iter().any(|e| matches!(e, WireEvent::StatusUpdate { .. }));
+        assert!(has_step, "Expected StepBegin");
+        assert!(has_text, "Expected TextPart");
+        assert!(has_status, "Expected StatusUpdate");
+    }
+
+    /// First LLM response triggers `enter_plan_mode`; second is echo without tools.
+    struct EnterPlanModeOnceThenEcho {
+        armed: std::sync::atomic::AtomicBool,
+    }
+
+    impl EnterPlanModeOnceThenEcho {
+        fn new() -> Self {
+            Self {
+                armed: std::sync::atomic::AtomicBool::new(true),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatProvider for EnterPlanModeOnceThenEcho {
+        async fn generate(
+            &self,
+            system_prompt: Option<String>,
+            history: Vec<Message>,
+            tools: Vec<serde_json::Value>,
+        ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+            use std::sync::atomic::Ordering;
+            if self.armed.swap(false, Ordering::SeqCst) {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![],
+                    vec![ToolCall {
+                        id: "tc-plan-1".to_string(),
+                        kind: "function".to_string(),
+                        function: FunctionCall {
+                            name: "enter_plan_mode".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    }],
+                    None,
+                )))
+            } else {
+                EchoProvider
+                    .generate(system_prompt, history, tools)
+                    .await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_status_update_reflects_plan_mode_after_plan_tool() {
+        let runtime = test_runtime();
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::EnterPlanModeTool));
+        }
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EnterPlanModeOnceThenEcho::new());
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+        assert!(!runtime.is_plan_mode().await);
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("use plan tool"), &hub, token)
+            .await
+            .unwrap();
+
+        let mut saw_plan_true = false;
+        while let Ok(envelope) = rx.try_recv() {
+            if let WireEvent::StatusUpdate {
+                plan_mode: true, ..
+            } = envelope.event
+            {
+                saw_plan_true = true;
+            }
+        }
+        assert!(
+            saw_plan_true,
+            "StatusUpdate.plan_mode should be true after enter_plan_mode tool (§1.2 L26)"
+        );
+        assert!(runtime.is_plan_mode().await);
+    }
+
+    #[tokio::test]
+    async fn test_step_wire_offset_tail_broadcasts_notification() {
+        let runtime = test_runtime();
+        let hub = runtime.hub.clone();
+        let mut rx = hub.subscribe();
+        runtime
+            .notifications
+            .publish(NotificationEvent {
+                category: "task".to_string(),
+                kind: "wire_tail_ping".to_string(),
+                severity: "info".to_string(),
+                payload: serde_json::json!({"n": 1}),
+                dedupe_key: None,
+            })
+            .await
+            .unwrap();
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await
+            .unwrap();
+
+        let mut saw = false;
+        while let Ok(envelope) = rx.try_recv() {
+            if matches!(
+                &envelope.event,
+                WireEvent::Notification { kind, .. } if kind == "wire_tail_ping"
+            ) {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            saw,
+            "expected WireEvent::Notification from §8.4 wire consumer offset tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_orchestrator() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+
+        let orch = PlanModeOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("plan something"), &hub, token)
+            .await;
+
+        assert!(result.is_ok());
+        let turn_result = result.unwrap();
+        assert_eq!(turn_result.stop_reason, "plan_mode_complete");
+
+        // Verify hub events
+        let mut events = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let has_plan_display = events.iter().any(|e| matches!(e, WireEvent::PlanDisplay { .. }));
+        assert!(has_plan_display, "Expected PlanDisplay in plan mode");
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_delivers_wire_offset_notifications() {
+        let runtime = test_runtime();
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+        runtime
+            .notifications
+            .publish(NotificationEvent {
+                category: "system".to_string(),
+                kind: "plan_wire_ping".to_string(),
+                severity: "info".to_string(),
+                payload: serde_json::json!({}),
+                dedupe_key: None,
+            })
+            .await
+            .unwrap();
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let orch = PlanModeOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("plan ping"), &hub, token)
+            .await
+            .unwrap();
+
+        let mut saw = false;
+        while let Ok(envelope) = rx.try_recv() {
+            if matches!(
+                &envelope.event,
+                WireEvent::Notification { kind, .. } if kind == "plan_wire_ping"
+            ) {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            saw,
+            "plan mode should emit §8.4 wire offset notifications before LLM streaming"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_orchestrator_swap() {
+        let runtime = test_runtime();
+        
+        // Default should be react
+        let orch = runtime.get_orchestrator().await;
+        assert_eq!(orch.name(), "react");
+
+        // Swap to plan mode
+        runtime.enter_plan_mode().await;
+        let orch = runtime.get_orchestrator().await;
+        assert_eq!(orch.name(), "plan");
+        assert!(runtime.is_plan_mode().await);
+
+        // Swap back
+        runtime.exit_plan_mode().await;
+        let orch = runtime.get_orchestrator().await;
+        assert_eq!(orch.name(), "react");
+        assert!(!runtime.is_plan_mode().await);
+    }
+
+    #[tokio::test]
+    async fn test_ralph_orchestrator_stops_on_decision() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        // Scripted provider: returns STOP when it sees the RALPH DECISION prompt
+        let llm: Arc<dyn ChatProvider> = Arc::new(
+            ScriptedProvider::new("Hello from echo provider.")
+                .with_response("[RALPH DECISION]", "STOP")
+        );
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+
+        let orch = RalphOrchestrator::new(5);
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await;
+
+        assert!(result.is_ok());
+        let turn_result = result.unwrap();
+        assert!(turn_result.stop_reason.contains("ralph_decided_stop") || turn_result.stop_reason == "ralph_complete",
+            "Expected ralph stop, got: {}", turn_result.stop_reason);
+
+        // Verify hub events show Ralph iterations
+        let mut events = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let has_ralph_start = events.iter().any(|e| {
+            matches!(e, WireEvent::TextPart { text } if text.contains("Ralph mode"))
+        });
+        assert!(has_ralph_start, "Expected Ralph mode start message");
+    }
+
+    #[tokio::test]
+    async fn test_ralph_orchestrator_max_iterations() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        // With max_iterations=1, the first iteration hits the max check before
+        // any decision gate or fast path, guaranteeing max_iterations stop.
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+
+        let orch = RalphOrchestrator::new(1);
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await;
+
+        assert!(result.is_ok());
+        let turn_result = result.unwrap();
+        assert!(turn_result.stop_reason.contains("ralph_max_iterations"),
+            "Expected max iterations stop, got: {}", turn_result.stop_reason);
+    }
+
+    #[tokio::test]
+    async fn test_ralph_orchestrator_fast_path_no_tools() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        // EchoProvider returns no tool calls → fast path should trigger
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+
+        let orch = RalphOrchestrator::new(5);
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await;
+
+        assert!(result.is_ok());
+        let turn_result = result.unwrap();
+        assert_eq!(turn_result.stop_reason, "ralph_complete");
+    }
+
+    #[tokio::test]
+    async fn test_react_orchestrator_consumes_steers() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+
+        // Queue a steer before the turn starts
+        runtime.steer_queue.push("steer message".to_string()).await;
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(&agent, context.clone(), llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await;
+
+        assert!(result.is_ok());
+        // The steer should be consumed and injected, causing the turn to continue
+        // Since EchoProvider returns no tool calls, the steer causes one extra step
+        // and then stops with no_tool_calls
+
+        // Verify steer queue is empty
+        assert!(runtime.steer_queue.is_empty().await);
+
+        // Verify SteerInput event was emitted
+        let mut has_steer = false;
+        while let Ok(envelope) = rx.try_recv() {
+            if matches!(envelope.event, WireEvent::SteerInput { .. }) {
+                has_steer = true;
+            }
+        }
+        assert!(has_steer, "Expected SteerInput event");
+    }
+
+    /// PreExecute side effect that blocks the `think` tool.
+    struct BlockThinkPreExecute;
+
+    #[async_trait]
+    impl SideEffect for BlockThinkPreExecute {
+        fn name(&self) -> &str {
+            "block_think_pre_execute"
+        }
+        fn stage(&self) -> HookStage {
+            HookStage::PreExecute
+        }
+        fn is_critical(&self) -> bool {
+            false
+        }
+
+        async fn execute(
+            &self,
+            _event: &str,
+            payload: &serde_json::Value,
+        ) -> anyhow::Result<SideEffectResult> {
+            if payload.get("tool").and_then(|t| t.as_str()) == Some("think") {
+                return Ok(SideEffectResult::block("no think"));
+            }
+            Ok(SideEffectResult::allow())
+        }
+    }
+
+    /// LLM that always emits a single `think` tool call.
+    struct ThinkCallProvider;
+
+    #[async_trait]
+    impl ChatProvider for ThinkCallProvider {
+        async fn generate(
+            &self,
+            _system_prompt: Option<String>,
+            _history: Vec<Message>,
+            _tools: Vec<serde_json::Value>,
+        ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+            Ok(Box::new(HttpGeneration::new(
+                vec![ContentPart::Text {
+                    text: "calling think".to_string(),
+                }],
+                vec![ToolCall {
+                    id: "tc1".to_string(),
+                    kind: "function".to_string(),
+                    function: FunctionCall {
+                        name: "think".to_string(),
+                        arguments: r#"{"thought":"hmm"}"#.to_string(),
+                    },
+                }],
+                None,
+            )))
+        }
+    }
+
+    fn collect_tool_results(events: &[WireEvent]) -> Vec<(bool, String)> {
+        events
+            .iter()
+            .filter_map(|e| {
+                if let WireEvent::ToolResult {
+                    output,
+                    is_error,
+                    ..
+                } = e
+                {
+                    Some((*is_error, output.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_structured_effects_preexecute_block_skips_tool() {
+        let mut f = FeatureFlags::default();
+        f.enable(ExperimentalFeature::StructuredEffects);
+        let runtime = test_runtime_with_features(f);
+        runtime
+            .hooks
+            .register(std::sync::Arc::new(BlockThinkPreExecute));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::think_tool()));
+        }
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider);
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let tool_results = collect_tool_results(&events);
+        assert!(
+            tool_results.iter().any(|(err, o)| *err && o.contains("Blocked by hook")),
+            "expected blocked tool result, got {:?}",
+            tool_results
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preexecute_block_ignored_without_structured_effects_flag() {
+        let runtime = test_runtime();
+        runtime
+            .hooks
+            .register(std::sync::Arc::new(BlockThinkPreExecute));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::think_tool()));
+        }
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider);
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch
+            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let tool_results = collect_tool_results(&events);
+        assert!(
+            tool_results.iter().any(|(err, o)| !err && !o.contains("Blocked by hook")),
+            "expected successful tool run ignoring PreExecute block, got {:?}",
+            tool_results
+        );
+    }
+
+    #[tokio::test]
+    async fn test_config_hot_reload() {
+        let runtime = test_runtime();
+        
+        // Verify initial config
+        {
+            let cfg = runtime.config.read().await;
+            assert_eq!(cfg.default_model, "echo");
+            assert_eq!(cfg.max_steps_per_turn, Some(10));
+        }
+
+        // Create a temp config file with different values
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        std::fs::write(&config_path, r#"
+[models]
+default_model = "gpt-4"
+
+[loop_control]
+max_steps_per_turn = 50
+max_context_size = 256000
+"#).unwrap();
+
+        // Reload
+        runtime.reload_config(&config_path).await.unwrap();
+
+        // Verify new config
+        {
+            let cfg = runtime.config.read().await;
+            assert_eq!(cfg.default_model, "gpt-4");
+            assert_eq!(cfg.max_steps_per_turn, Some(50));
+            assert_eq!(cfg.max_context_size, Some(256_000));
+        }
+    }
+}

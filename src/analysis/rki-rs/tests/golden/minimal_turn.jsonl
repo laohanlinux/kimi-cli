@@ -1,0 +1,3 @@
+{"type":"turn_begin","user_input":{"text":"hello golden"}}
+{"type":"text_part","text":"ack"}
+{"type":"turn_end"}
