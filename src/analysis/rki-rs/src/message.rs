@@ -221,7 +221,7 @@ impl<'de> Deserialize<'de> for UserMessage {
 }
 
 /// Structured content block for tool output and context storage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {

@@ -125,6 +125,16 @@ impl TurnOrchestrator for ReActOrchestrator {
     }
 }
 
+/// Outcome of a single step in the ReAct loop.
+enum StepResult {
+    /// Tool calls were made; continue to next step.
+    Continue,
+    /// No tool calls from LLM; turn ends.
+    NoToolCalls,
+    /// One or more tools were rejected; turn ends.
+    ToolRejected,
+}
+
 impl ReActOrchestrator {
     async fn _agent_loop(
         agent: &Agent,
@@ -155,11 +165,13 @@ impl ReActOrchestrator {
             )
             .await
             {
-                Ok(has_tool_calls) => {
-                    if !has_tool_calls {
-                        return Ok("no_tool_calls".to_string());
-                    }
+                Ok(StepResult::NoToolCalls) => {
+                    return Ok("no_tool_calls".to_string());
                 }
+                Ok(StepResult::ToolRejected) => {
+                    return Ok("tool_rejected".to_string());
+                }
+                Ok(StepResult::Continue) => {}
                 Err(e) => {
                     if let Some(bttf) = e.downcast_ref::<BackToTheFuture>() {
                         let mut ctx = context.lock().await;
@@ -188,7 +200,7 @@ impl ReActOrchestrator {
         hub: &RootWireHub,
         checkpoint_id: u64,
         token: ContextToken,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<StepResult> {
         let config = runtime.config.read().await;
         let max_context = config.max_context_size.unwrap_or(128_000);
         let threshold_percent = config.compaction_threshold_percent;
@@ -306,6 +318,7 @@ impl ReActOrchestrator {
 
         let tool_calls = generation.tool_calls().await;
         let has_tool_calls = !tool_calls.is_empty();
+        let mut any_rejected = false;
 
         if has_tool_calls {
             for tc in &tool_calls {
@@ -345,6 +358,7 @@ impl ReActOrchestrator {
                         elapsed_ms: None,
                     }))
                     .await?;
+                    any_rejected = true;
                     continue;
                 }
 
@@ -382,6 +396,7 @@ impl ReActOrchestrator {
                         }))
                         .await?;
                         drop(ctx);
+                        any_rejected = true;
                         continue;
                     }
                 }
@@ -435,6 +450,10 @@ impl ReActOrchestrator {
                             .await?;
                     }
                     Err(e) => {
+                        let is_rejected = e.downcast_ref::<crate::tools::ToolRejected>().is_some();
+                        if is_rejected {
+                            any_rejected = true;
+                        }
                         hub.broadcast(WireEvent::ToolResult {
                             tool_call_id: tc.id.clone(),
                             output: e.to_string(),
@@ -483,6 +502,11 @@ impl ReActOrchestrator {
             }
         }
 
+        // Rejection handling: if any tool was rejected, end the turn (§1.2 L28).
+        if any_rejected {
+            return Ok(StepResult::ToolRejected);
+        }
+
         // Emit status update after every step (plan_mode reflects runtime, e.g. after enter_plan_mode tool)
         let ctx = context.lock().await;
         let token_count = ctx.token_count();
@@ -506,7 +530,7 @@ impl ReActOrchestrator {
             hub.broadcast(WireEvent::SteerInput {
                 content: "steer injected".to_string(),
             });
-            return Ok(true); // continue to next step
+            return Ok(StepResult::Continue); // continue to next step
         }
 
         // D-Mail check
@@ -522,7 +546,11 @@ impl ReActOrchestrator {
             }));
         }
 
-        Ok(has_tool_calls)
+        if has_tool_calls {
+            Ok(StepResult::Continue)
+        } else {
+            Ok(StepResult::NoToolCalls)
+        }
     }
 }
 
@@ -1089,6 +1117,86 @@ mod tests {
             "StatusUpdate.plan_mode should be true after enter_plan_mode tool (§1.2 L26)"
         );
         assert!(runtime.is_plan_mode().await);
+    }
+
+    #[tokio::test]
+    async fn test_react_orchestrator_tool_rejected_stop_reason() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+
+        // Register a tool that always rejects
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::FunctionTool::new(
+                "always_reject",
+                "A tool that always rejects",
+                serde_json::json!({"type": "object", "properties": {}}),
+                |_args: serde_json::Value, _ctx: &crate::tools::ToolContext| async move {
+                    Err(crate::tools::ToolRejected {
+                        reason: "test rejection".to_string(),
+                        has_feedback: false,
+                    }.into())
+                },
+            )));
+        }
+
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+
+        // LLM that always calls the rejecting tool
+        struct ToolCallProvider;
+        #[async_trait]
+        impl ChatProvider for ToolCallProvider {
+            async fn generate(
+                &self,
+                _system_prompt: Option<String>,
+                _history: Vec<Message>,
+                _tools: Vec<serde_json::Value>,
+            ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![],
+                    vec![ToolCall {
+                        id: "tc-1".to_string(),
+                        kind: "function".to_string(),
+                        function: FunctionCall {
+                            name: "always_reject".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    }],
+                    None,
+                )))
+            }
+        }
+
+        let llm: Arc<dyn ChatProvider> = Arc::new(ToolCallProvider);
+        let hub = RootWireHub::new();
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("call rejecting tool"),
+                &hub,
+                token,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().stop_reason, "tool_rejected");
     }
 
     #[tokio::test]

@@ -374,6 +374,103 @@ impl Tool for SendDMailTool {
     }
 }
 
+/// Stateless function tool: plus — add two numbers (test diagnostic).
+pub fn plus_tool() -> FunctionTool {
+    FunctionTool::new(
+        "plus",
+        "Add two numbers",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "number" },
+                "b": { "type": "number" }
+            },
+            "required": ["a", "b"]
+        }),
+        |args: Value, _ctx: &ToolContext| async move {
+            let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let sum = a + b;
+            Ok(ToolOutput {
+                result: ToolResult {
+                    r#type: "success".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: sum.to_string(),
+                    }],
+                    summary: format!("{} + {} = {}", a, b, sum),
+                },
+                artifacts: vec![],
+                metrics: ToolMetrics::default(),
+            })
+        },
+    )
+}
+
+/// Stateless function tool: compare — compare two numbers (test diagnostic).
+pub fn compare_tool() -> FunctionTool {
+    FunctionTool::new(
+        "compare",
+        "Compare two numbers",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "number" },
+                "b": { "type": "number" }
+            },
+            "required": ["a", "b"]
+        }),
+        |args: Value, _ctx: &ToolContext| async move {
+            let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let result = if a > b {
+                "greater"
+            } else if a < b {
+                "less"
+            } else {
+                "equal"
+            };
+            Ok(ToolOutput {
+                result: ToolResult {
+                    r#type: "success".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: result.to_string(),
+                    }],
+                    summary: format!("{} is {} than {}", a, result, b),
+                },
+                artifacts: vec![],
+                metrics: ToolMetrics::default(),
+            })
+        },
+    )
+}
+
+/// Stateless function tool: panic — raise an error after 2 seconds (test diagnostic).
+pub fn panic_tool() -> FunctionTool {
+    FunctionTool::new(
+        "panic",
+        "Raise an exception to cause the tool call to fail",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
+        }),
+        |args: Value, _ctx: &ToolContext| async move {
+            let message = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            Err(anyhow::anyhow!(
+                "panicked with a message with {} characters",
+                message.len()
+            ))
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +593,46 @@ mod tests {
         assert_eq!(out.result.r#type, "success");
         assert!(out.result.summary.contains("Question answered"));
         let _ = resolve_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_plus_tool() {
+        let tool = plus_tool();
+        let ctx = test_ctx();
+        let out = tool.call(serde_json::json!({"a": 3.0, "b": 4.0}), &ctx).await.unwrap();
+        assert_eq!(out.result.r#type, "success");
+        assert_eq!(
+            out.result.content,
+            vec![ContentBlock::Text { text: "7".to_string() }]
+        );
+        assert!(out.result.summary.contains("7"));
+    }
+
+    #[tokio::test]
+    async fn test_compare_tool() {
+        let tool = compare_tool();
+        let ctx = test_ctx();
+        let out = tool.call(serde_json::json!({"a": 5.0, "b": 3.0}), &ctx).await.unwrap();
+        assert_eq!(out.result.content, vec![ContentBlock::Text { text: "greater".to_string() }]);
+
+        let out = tool.call(serde_json::json!({"a": 2.0, "b": 7.0}), &ctx).await.unwrap();
+        assert_eq!(out.result.content, vec![ContentBlock::Text { text: "less".to_string() }]);
+
+        let out = tool.call(serde_json::json!({"a": 4.0, "b": 4.0}), &ctx).await.unwrap();
+        assert_eq!(out.result.content, vec![ContentBlock::Text { text: "equal".to_string() }]);
+    }
+
+    #[tokio::test]
+    async fn test_panic_tool() {
+        let tool = panic_tool();
+        let ctx = test_ctx();
+        let start = std::time::Instant::now();
+        let out = tool.call(serde_json::json!({"message": "hello"}), &ctx).await;
+        let elapsed = start.elapsed();
+        assert!(out.is_err());
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains("panicked"));
+        assert!(err.contains("5 characters"));
+        assert!(elapsed >= std::time::Duration::from_secs(2), "panic tool should sleep 2s");
     }
 }

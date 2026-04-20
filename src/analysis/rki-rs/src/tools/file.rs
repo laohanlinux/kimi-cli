@@ -99,17 +99,10 @@ impl Tool for ReadFileTool {
             )
             .await?;
         if !approved {
-            return Ok(ToolOutput {
-                result: ToolResult {
-                    r#type: "error".to_string(),
-                    content: vec![ContentBlock::Text {
-                        text: "Approval rejected".to_string(),
-                    }],
-                    summary: "Approval rejected".to_string(),
-                },
-                artifacts: vec![],
-                metrics: ToolMetrics::default(),
-            });
+            return Err(crate::tools::ToolRejected {
+                reason: "Approval rejected".to_string(),
+                has_feedback: false,
+            }.into());
         }
         let line_offset = args
             .get("line_offset")
@@ -178,17 +171,10 @@ impl Tool for WriteFileTool {
             )
             .await?;
         if !approved {
-            return Ok(ToolOutput {
-                result: ToolResult {
-                    r#type: "error".to_string(),
-                    content: vec![ContentBlock::Text {
-                        text: "Approval rejected".to_string(),
-                    }],
-                    summary: "Approval rejected".to_string(),
-                },
-                artifacts: vec![],
-                metrics: ToolMetrics::default(),
-            });
+            return Err(crate::tools::ToolRejected {
+                reason: "Approval rejected".to_string(),
+                has_feedback: false,
+            }.into());
         }
         // Capture before state for diff (§7.3 structured output)
         let before = tokio::fs::read_to_string(path).await.unwrap_or_default();

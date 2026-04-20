@@ -9,6 +9,23 @@ use crate::wire::RootWireHub;
 use async_trait::async_trait;
 use serde_json::Value;
 
+/// Error type indicating a tool call was rejected (approval denied or hook blocked).
+///
+/// When the orchestrator sees this, it may end the turn with `stop_reason="tool_rejected"`.
+#[derive(Debug, Clone)]
+pub struct ToolRejected {
+    pub reason: String,
+    pub has_feedback: bool,
+}
+
+impl std::fmt::Display for ToolRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Tool rejected: {}", self.reason)
+    }
+}
+
+impl std::error::Error for ToolRejected {}
+
 pub mod agent;
 pub mod file;
 pub mod function_toolkit;
@@ -27,7 +44,7 @@ pub use function_toolkit::{FunctionTool, FunctionToolBuilder};
 pub use manifest::{ManifestTool, discover_manifests};
 pub use misc::{
     AskUserQuestionTool, SendDMailTool, SetTodoListTool, ThinkTool, ask_user_question_tool,
-    send_dmail_tool, set_todo_list_tool, think_tool,
+    compare_tool, panic_tool, plus_tool, send_dmail_tool, set_todo_list_tool, think_tool,
 };
 pub use plan::{EnterPlanModeTool, ExitPlanModeTool, enter_plan_mode_tool, exit_plan_mode_tool};
 pub use shell::ShellTool;

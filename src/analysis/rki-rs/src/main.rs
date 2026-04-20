@@ -232,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
         ts.register(Box::new(tools::task_stop_tool()));
         ts.register(Box::new(tools::enter_plan_mode_tool()));
         ts.register(Box::new(tools::exit_plan_mode_tool()));
+        ts.register(Box::new(tools::plus_tool()));
+        ts.register(Box::new(tools::compare_tool()));
+        ts.register(Box::new(tools::panic_tool()));
         if runtime
             .features
             .is_enabled(rki_rs::feature_flags::ExperimentalFeature::FunctionTools)

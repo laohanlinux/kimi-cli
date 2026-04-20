@@ -204,17 +204,10 @@ pub fn task_stop_tool() -> FunctionTool {
                     )
                     .await?;
                 if !approved {
-                    return Ok(ToolOutput {
-                        result: ToolResult {
-                            r#type: "error".to_string(),
-                            content: vec![ContentBlock::Text {
-                                text: "Approval rejected".to_string(),
-                            }],
-                            summary: "Approval rejected".to_string(),
-                        },
-                        artifacts: vec![],
-                        metrics: ToolMetrics::default(),
-                    });
+                    return Err(crate::tools::ToolRejected {
+                        reason: "Approval rejected".to_string(),
+                        has_feedback: false,
+                    }.into());
                 }
                 ctx.runtime.bg_manager.cancel(task_id).await?;
                 Ok(ToolOutput {
@@ -269,17 +262,10 @@ impl Tool for TaskStopTool {
             )
             .await?;
         if !approved {
-            return Ok(ToolOutput {
-                result: ToolResult {
-                    r#type: "error".to_string(),
-                    content: vec![ContentBlock::Text {
-                        text: "Approval rejected".to_string(),
-                    }],
-                    summary: "Approval rejected".to_string(),
-                },
-                artifacts: vec![],
-                metrics: ToolMetrics::default(),
-            });
+            return Err(crate::tools::ToolRejected {
+                reason: "Approval rejected".to_string(),
+                has_feedback: false,
+            }.into());
         }
         ctx.runtime.bg_manager.cancel(task_id).await?;
         Ok(ToolOutput {

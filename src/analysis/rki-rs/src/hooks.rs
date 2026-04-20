@@ -14,6 +14,7 @@ pub enum HookStage {
     PostExecute,
     PostExecuteFailure,
     Audit,
+    Stop,
 }
 
 /// Decision returned by a side effect.

@@ -14,6 +14,7 @@ use crate::runtime::Runtime;
 use crate::slash::SlashOutcome;
 use crate::wire::{RootWireHub, WireEvent};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 #[derive(Debug)]
@@ -35,6 +36,7 @@ pub struct KimiSoul {
     context: Arc<Mutex<Context>>,
     llm: Arc<dyn ChatProvider>,
     runtime: Runtime,
+    stop_hook_active: AtomicBool,
 }
 
 impl KimiSoul {
@@ -49,6 +51,7 @@ impl KimiSoul {
             context,
             llm,
             runtime,
+            stop_hook_active: AtomicBool::new(false),
         }
     }
 
@@ -148,7 +151,7 @@ impl KimiSoul {
             .runtime
             .context_token_for_turn(uuid::Uuid::new_v4().to_string());
         let orchestrator = self.runtime.get_orchestrator().await;
-        let result = orchestrator
+        let mut result = orchestrator
             .execute_turn(
                 &self.agent,
                 self.context.clone(),
@@ -156,9 +159,48 @@ impl KimiSoul {
                 &self.runtime,
                 turn,
                 hub,
-                token,
+                token.clone(),
             )
             .await;
+
+        // --- Stop hook (max 1 re-trigger to prevent infinite loop) ---
+        if result.is_ok() && !self.stop_hook_active.load(Ordering::SeqCst) {
+            let stop_payload = serde_json::json!({
+                "session_id": self.runtime.session.id,
+                "cwd": std::env::current_dir().unwrap_or_default().to_string_lossy(),
+                "stop_hook_active": false,
+            });
+            match self
+                .runtime
+                .hooks
+                .run(crate::hooks::HookStage::Stop, "stop", &stop_payload)
+                .await
+            {
+                Ok(crate::hooks::SideEffectResult {
+                    decision: crate::hooks::EffectDecision::Block { reason },
+                    ..
+                }) if !reason.is_empty() => {
+                    self.stop_hook_active.store(true, Ordering::SeqCst);
+                    let re_trigger_turn = crate::turn_input::TurnInput::text(reason);
+                    let re_trigger_token = self
+                        .runtime
+                        .context_token_for_turn(uuid::Uuid::new_v4().to_string());
+                    result = orchestrator
+                        .execute_turn(
+                            &self.agent,
+                            self.context.clone(),
+                            self.llm.clone(),
+                            &self.runtime,
+                            re_trigger_turn,
+                            hub,
+                            re_trigger_token,
+                        )
+                        .await;
+                    self.stop_hook_active.store(false, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
 
         hub.broadcast(WireEvent::TurnEnd);
         // Auto-set session title after first real turn (§1.2 step 34)
@@ -321,5 +363,81 @@ mod tests {
         let r = soul.run(turn, &hub).await.unwrap();
         assert_ne!(r.stop_reason, "validation:vision_not_supported");
         assert_ne!(r.stop_reason, "validation:empty");
+    }
+
+    #[tokio::test]
+    async fn test_stop_hook_re_trigger_max_once() {
+        use crate::hooks::{EffectDecision, HookStage, SideEffect, SideEffectResult};
+        use async_trait::async_trait;
+        use serde_json::Value;
+
+        struct StopReTrigger;
+        #[async_trait]
+        impl SideEffect for StopReTrigger {
+            fn name(&self) -> &str { "stop_retrigger" }
+            fn stage(&self) -> HookStage { HookStage::Stop }
+            fn is_critical(&self) -> bool { false }
+            async fn execute(&self, _event: &str, _payload: &Value) -> anyhow::Result<SideEffectResult> {
+                Ok(SideEffectResult {
+                    decision: EffectDecision::Block { reason: "follow-up".to_string() },
+                    message: None,
+                })
+            }
+        }
+
+        let soul = test_soul();
+        soul.runtime.hooks.register(std::sync::Arc::new(StopReTrigger));
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+        let result = soul.run("hello", &hub).await.unwrap();
+        // EchoProvider returns no_tool_calls; stop hook re-triggers once with "follow-up"
+        // The re-triggered turn also returns no_tool_calls.
+        assert_eq!(result.stop_reason, "no_tool_calls");
+        // Verify only one TurnBegin (the original) and one TurnEnd
+        let mut events = vec![];
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let turn_begins = events.iter().filter(|e| matches!(e, WireEvent::TurnBegin { .. })).count();
+        let turn_ends = events.iter().filter(|e| matches!(e, WireEvent::TurnEnd)).count();
+        assert_eq!(turn_begins, 1, "Only original turn should broadcast TurnBegin");
+        assert_eq!(turn_ends, 1, "Only one TurnEnd after stop hook re-trigger");
+    }
+
+    #[tokio::test]
+    async fn test_stop_hook_no_re_trigger_when_already_active() {
+        use crate::hooks::{EffectDecision, HookStage, SideEffect, SideEffectResult};
+        use async_trait::async_trait;
+        use serde_json::Value;
+
+        struct StopReTrigger;
+        #[async_trait]
+        impl SideEffect for StopReTrigger {
+            fn name(&self) -> &str { "stop_retrigger" }
+            fn stage(&self) -> HookStage { HookStage::Stop }
+            fn is_critical(&self) -> bool { false }
+            async fn execute(&self, _event: &str, _payload: &Value) -> anyhow::Result<SideEffectResult> {
+                Ok(SideEffectResult {
+                    decision: EffectDecision::Block { reason: "follow-up".to_string() },
+                    message: None,
+                })
+            }
+        }
+
+        let soul = test_soul();
+        soul.runtime.hooks.register(std::sync::Arc::new(StopReTrigger));
+        // Manually set stop_hook_active to simulate being inside a re-triggered turn
+        soul.stop_hook_active.store(true, Ordering::SeqCst);
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+        let result = soul.run("hello", &hub).await.unwrap();
+        assert_eq!(result.stop_reason, "no_tool_calls");
+        // No re-trigger should happen
+        let mut events = vec![];
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let turn_begins = events.iter().filter(|e| matches!(e, WireEvent::TurnBegin { .. })).count();
+        assert_eq!(turn_begins, 1);
     }
 }
