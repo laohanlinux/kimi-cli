@@ -22,8 +22,7 @@ impl CapabilityRegistry {
 
     /// Register a capability value. Overwrites any existing entry of the same type.
     pub fn register<T: 'static + Send + Sync>(&mut self, value: T) {
-        self.capabilities
-            .insert(TypeId::of::<T>(), Arc::new(value));
+        self.capabilities.insert(TypeId::of::<T>(), Arc::new(value));
     }
 
     /// Get a reference to a capability by type.

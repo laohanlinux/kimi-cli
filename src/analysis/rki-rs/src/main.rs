@@ -1,8 +1,8 @@
 use clap::Parser;
 use rki_rs::{
-    acp, agent, agents_md, approval, capability, cli, config, config_registry, config_watcher, context,
-    feature_flags, llm, mcp, memory, runtime, session, skills, soul, store, tools, turn_input, wire,
-    workdir_ls,
+    acp, agent, agents_md, approval, capability, cli, config, config_registry, config_watcher,
+    context, feature_flags, llm, mcp, memory, runtime, session, skills, soul, store, tools,
+    turn_input, wire, workdir_ls,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -14,7 +14,10 @@ fn kimi_home() -> std::path::PathBuf {
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".kimi"));
     // Ensure directory exists so SQLite can create the database file
     if let Err(e) = std::fs::create_dir_all(&path) {
-        eprintln!("Warning: failed to create kimi home directory {:?}: {}", path, e);
+        eprintln!(
+            "Warning: failed to create kimi home directory {:?}: {}",
+            path, e
+        );
     }
     path
 }
@@ -93,7 +96,8 @@ async fn main() -> anyhow::Result<()> {
         args.auto_approve.clone().unwrap_or_default(),
     );
     if let Some(ref profile) = config.trust_profile {
-        approval = approval.with_capability_engine(capability::CapabilityEngine::new(profile.clone()));
+        approval =
+            approval.with_capability_engine(capability::CapabilityEngine::new(profile.clone()));
     }
     if args.print {
         approval.set_headless_ide_mode();
@@ -101,7 +105,14 @@ async fn main() -> anyhow::Result<()> {
     let approval = Arc::new(approval);
 
     let features = feature_flags::FeatureFlags::from_env();
-    let runtime = runtime::Runtime::with_features(config.clone(), session.clone(), approval.clone(), hub.clone(), store.clone(), features);
+    let runtime = runtime::Runtime::with_features(
+        config.clone(),
+        session.clone(),
+        approval.clone(),
+        hub.clone(),
+        store.clone(),
+        features,
+    );
     let _ = runtime.bg_manager.recover().await;
 
     // CLI mode overrides: plan mode and Ralph mode (§1.2 bootstrap flags)
@@ -109,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         runtime.enter_plan_mode().await;
         hub.broadcast(wire::WireEvent::PlanDisplay {
             content: "Plan mode active (via --plan).".to_string(),
+            file_path: String::new(),
         });
     }
     if args.ralph {
@@ -121,58 +133,66 @@ async fn main() -> anyhow::Result<()> {
 
     // Config watcher with hot-reload and selective propagation (§8.7)
     let config_path_for_watcher = config_path.clone();
-    let propagator = config_watcher::ConfigChangePropagator::new(
-        config_path.clone(),
-        Some(config.clone()),
-    );
+    let propagator =
+        config_watcher::ConfigChangePropagator::new(config_path.clone(), Some(config.clone()));
     let propagator_for_watcher = propagator.clone();
     let runtime_for_watcher = runtime.clone();
     let config_path_for_sub = config_path.clone();
     propagator.subscribe(
         "model",
-        Box::new(move |_section: &str, _old: &config::Config, _new: &config::Config| {
-            let rt = runtime_for_watcher.clone();
-            let p = config_path_for_sub.clone();
-            tokio::spawn(async move {
-                match rt.reload_config(&p).await {
-                    Ok(_) => tracing::info!("Config hot-reloaded from {:?}", p),
-                    Err(e) => tracing::warn!("Failed to hot-reload config: {}", e),
-                }
-            });
-        }),
+        Box::new(
+            move |_section: &str, _old: &config::Config, _new: &config::Config| {
+                let rt = runtime_for_watcher.clone();
+                let p = config_path_for_sub.clone();
+                tokio::spawn(async move {
+                    match rt.reload_config(&p).await {
+                        Ok(_) => tracing::info!("Config hot-reloaded from {:?}", p),
+                        Err(e) => tracing::warn!("Failed to hot-reload config: {}", e),
+                    }
+                });
+            },
+        ),
     );
     let runtime_for_orch_watcher = runtime.clone();
     let config_path_for_orch_sub = config_path.clone();
     propagator.subscribe(
         "orchestrator",
-        Box::new(move |_section: &str, _old: &config::Config, _new_cfg: &config::Config| {
-            let rt = runtime_for_orch_watcher.clone();
-            let p = config_path_for_orch_sub.clone();
-            tokio::spawn(async move {
-                match rt.reload_config(&p).await {
-                    Ok(_) => {
-                        let orch_name = {
-                            let cfg = rt.config.read().await;
-                            cfg.default_orchestrator.clone()
-                        };
-                        let new_orch: Arc<dyn rki_rs::orchestrator::TurnOrchestrator> = match orch_name.as_str() {
-                            "plan" => Arc::new(rki_rs::orchestrator::PlanModeOrchestrator),
-                            "ralph" => {
-                                let max_iter = {
-                                    let cfg = rt.config.read().await;
-                                    cfg.ralph_max_iterations.max(1)
+        Box::new(
+            move |_section: &str, _old: &config::Config, _new_cfg: &config::Config| {
+                let rt = runtime_for_orch_watcher.clone();
+                let p = config_path_for_orch_sub.clone();
+                tokio::spawn(async move {
+                    match rt.reload_config(&p).await {
+                        Ok(_) => {
+                            let orch_name = {
+                                let cfg = rt.config.read().await;
+                                cfg.default_orchestrator.clone()
+                            };
+                            let new_orch: Arc<dyn rki_rs::orchestrator::TurnOrchestrator> =
+                                match orch_name.as_str() {
+                                    "plan" => Arc::new(rki_rs::orchestrator::PlanModeOrchestrator),
+                                    "ralph" => {
+                                        let max_iter = {
+                                            let cfg = rt.config.read().await;
+                                            cfg.ralph_max_iterations.max(1)
+                                        };
+                                        Arc::new(rki_rs::orchestrator::RalphOrchestrator::new(
+                                            max_iter,
+                                        ))
+                                    }
+                                    _ => Arc::new(rki_rs::orchestrator::ReActOrchestrator),
                                 };
-                                Arc::new(rki_rs::orchestrator::RalphOrchestrator::new(max_iter))
-                            }
-                            _ => Arc::new(rki_rs::orchestrator::ReActOrchestrator),
-                        };
-                        rt.set_orchestrator(new_orch).await;
-                        tracing::info!("Orchestrator switched to '{}' via hot-reload", orch_name);
+                            rt.set_orchestrator(new_orch).await;
+                            tracing::info!(
+                                "Orchestrator switched to '{}' via hot-reload",
+                                orch_name
+                            );
+                        }
+                        Err(e) => tracing::warn!("Failed to hot-reload orchestrator config: {}", e),
                     }
-                    Err(e) => tracing::warn!("Failed to hot-reload orchestrator config: {}", e),
-                }
-            });
-        }),
+                });
+            },
+        ),
     );
     propagator.subscribe(
         "mcp",
@@ -182,8 +202,12 @@ async fn main() -> anyhow::Result<()> {
             );
         }),
     );
-    if runtime.features.is_enabled(rki_rs::feature_flags::ExperimentalFeature::ConfigHotReload) {
-        let _config_watcher = config_watcher::ConfigWatcher::new(&config_path_for_watcher, propagator_for_watcher);
+    if runtime
+        .features
+        .is_enabled(rki_rs::feature_flags::ExperimentalFeature::ConfigHotReload)
+    {
+        let _config_watcher =
+            config_watcher::ConfigWatcher::new(&config_path_for_watcher, propagator_for_watcher);
     }
     let toolset = runtime.toolset.clone();
     let mut mcp_sessions: Vec<Arc<mcp::MCPSession>> = Vec::new();
@@ -240,7 +264,10 @@ async fn main() -> anyhow::Result<()> {
             );
             ts.register(Box::new(fn_tool));
         }
-        if runtime.features.is_enabled(rki_rs::feature_flags::ExperimentalFeature::PluginRegistry) {
+        if runtime
+            .features
+            .is_enabled(rki_rs::feature_flags::ExperimentalFeature::PluginRegistry)
+        {
             for (manifest, tool_dir) in tools::discover_manifests(&session.work_dir) {
                 ts.register(Box::new(tools::ManifestTool::new(manifest, tool_dir)));
             }
@@ -253,44 +280,47 @@ async fn main() -> anyhow::Result<()> {
             .join("mcp.json");
         if mcp_path.exists()
             && let Ok(content) = std::fs::read_to_string(&mcp_path)
-                && let Ok(mcp_config) = serde_json::from_str::<serde_json::Value>(&content)
-                    && let Some(servers) = mcp_config["servers"].as_object() {
-                        for (name, server) in servers {
-                            if let Some(cmd) = server["command"].as_str() {
-                                let args: Vec<String> = server["args"]
-                                    .as_array()
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                let mut command = vec![cmd.to_string()];
-                                command.extend(args);
-                                let client = Arc::new(mcp::MCPClient::new(name.clone(), command));
-                                let session = Arc::new(mcp::MCPSession::new(client.clone()));
-                                mcp_sessions.push(session.clone());
-                                match client.list_tools().await {
-                                    Ok(mcp_tools) => {
-                                        for tool in mcp_tools {
-                                            ts.register(Box::new(mcp::MCPTool::new(
-                                                tool.name.clone(),
-                                                tool.description.clone(),
-                                                tool.input_schema,
-                                                client.clone(),
-                                            )));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to load MCP tools from {}: {}", name, e);
-                                    }
-                                }
+            && let Ok(mcp_config) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(servers) = mcp_config["servers"].as_object()
+        {
+            for (name, server) in servers {
+                if let Some(cmd) = server["command"].as_str() {
+                    let args: Vec<String> = server["args"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut command = vec![cmd.to_string()];
+                    command.extend(args);
+                    let client = Arc::new(mcp::MCPClient::new(name.clone(), command));
+                    let session = Arc::new(mcp::MCPSession::new(client.clone()));
+                    mcp_sessions.push(session.clone());
+                    match client.list_tools().await {
+                        Ok(mcp_tools) => {
+                            for tool in mcp_tools {
+                                ts.register(Box::new(mcp::MCPTool::new(
+                                    tool.name.clone(),
+                                    tool.description.clone(),
+                                    tool.input_schema,
+                                    client.clone(),
+                                )));
                             }
                         }
+                        Err(e) => {
+                            eprintln!("Failed to load MCP tools from {}: {}", name, e);
+                        }
                     }
+                }
+            }
+        }
     }
 
-    let context = Arc::new(Mutex::new(context::Context::load(&store, &session.id).await?));
+    let context = Arc::new(Mutex::new(
+        context::Context::load(&store, &session.id).await?,
+    ));
     if runtime
         .features
         .is_enabled(feature_flags::ExperimentalFeature::SemanticEmbeddings)
@@ -336,13 +366,21 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let model = args.model.as_deref().unwrap_or(&config.default_model);
+    // §1.2 L16: vision validation uses `default_model`; align with CLI `--model` for the active provider.
+    if args.model.is_some() {
+        let mut cfg = runtime.config.write().await;
+        cfg.default_model = model.to_string();
+    }
     let llm: Arc<dyn llm::ChatProvider> = if model == "echo" {
         Arc::new(llm::EchoProvider)
     } else {
         match llm::create_provider(model, &runtime.identity, Some(session.id.clone())).await {
             Ok(p) => Arc::from(p),
             Err(e) => {
-                eprintln!("Failed to create provider for '{}': {}. Falling back to echo.", model, e);
+                eprintln!(
+                    "Failed to create provider for '{}': {}. Falling back to echo.",
+                    model, e
+                );
                 Arc::new(llm::EchoProvider)
             }
         }
@@ -392,11 +430,16 @@ async fn main() -> anyhow::Result<()> {
     let question_ui = runtime.question.clone();
     let mut hub_rx = hub.subscribe();
     let hub_task = tokio::spawn(async move {
-        use wire::WireEvent;
         use std::io::Write;
+        use wire::WireEvent;
         while let Ok(envelope) = hub_rx.recv().await {
             match envelope.event {
-                WireEvent::ApprovalRequest { id, action, description, .. } => {
+                WireEvent::ApprovalRequest {
+                    id,
+                    action,
+                    description,
+                    ..
+                } => {
                     println!("\n[Approval {}] {}: {}", id, action, description);
                     print!("Approve? (y/n): ");
                     let _ = std::io::stdout().flush();
@@ -428,8 +471,8 @@ async fn main() -> anyhow::Result<()> {
     // UI subscribes directly to the session hub (§5.2: persistent session stream)
     let mut rx = hub.subscribe();
     let ui_task = tokio::spawn(async move {
-        use wire::WireEvent;
         use std::io::Write;
+        use wire::WireEvent;
         while let Ok(envelope) = rx.recv().await {
             match envelope.event {
                 WireEvent::TurnBegin { user_input } => {
@@ -446,7 +489,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 WireEvent::ThinkPart { text } => println!("[thinking: {}]", text),
                 WireEvent::ToolCall { id, function } => {
-                    println!("\n[ToolCall {}] {}({})", id, function.name, function.arguments);
+                    println!(
+                        "\n[ToolCall {}] {}({})",
+                        id, function.name, function.arguments
+                    );
                 }
                 WireEvent::ToolResult {
                     tool_call_id,
@@ -454,7 +500,10 @@ async fn main() -> anyhow::Result<()> {
                     is_error,
                     elapsed_ms,
                 } => {
-                    println!("\n[ToolResult {}] error={} elapsed={:?}\n{}", tool_call_id, is_error, elapsed_ms, output);
+                    println!(
+                        "\n[ToolResult {}] error={} elapsed={:?}\n{}",
+                        tool_call_id, is_error, elapsed_ms, output
+                    );
                 }
                 WireEvent::StatusUpdate {
                     token_count,
@@ -468,10 +517,7 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 _ if envelope.is_subagent_event() => {
-                    println!(
-                        "\n[Subagent {:?}] {:?}",
-                        envelope.source, envelope.event
-                    );
+                    println!("\n[Subagent {:?}] {:?}", envelope.source, envelope.event);
                 }
                 WireEvent::CompactionBegin => println!("[CompactionBegin]"),
                 WireEvent::CompactionEnd => println!("[CompactionEnd]"),
@@ -508,7 +554,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         });
-        let acp_server = acp::AcpServer::new(hub.clone(), port, Some(turn_tx), acp_auth_token);
+        let acp_server = acp::AcpServer::new(
+            hub.clone(),
+            port,
+            Some(turn_tx),
+            acp_auth_token,
+            acp::default_max_request_bytes(),
+        );
         Some(tokio::spawn(async move {
             if let Err(e) = acp_server.run().await {
                 tracing::error!("ACP server error: {}", e);
@@ -531,12 +583,25 @@ async fn main() -> anyhow::Result<()> {
                     use wire::WireEvent;
                     match &envelope.event {
                         WireEvent::TextPart { text } => output.push_str(text),
-                        WireEvent::ThinkPart { text } => output.push_str(&format!("[thinking: {}]\n", text)),
-                        WireEvent::ToolCall { id, function } => {
-                            output.push_str(&format!("\n[Tool {}] {}({})\n", id, function.name, function.arguments));
+                        WireEvent::ThinkPart { text } => {
+                            output.push_str(&format!("[thinking: {}]\n", text))
                         }
-                        WireEvent::ToolResult { tool_call_id, output: result, is_error, elapsed_ms } => {
-                            output.push_str(&format!("[Result {}] error={} elapsed={:?}\n{}\n", tool_call_id, is_error, elapsed_ms, result));
+                        WireEvent::ToolCall { id, function } => {
+                            output.push_str(&format!(
+                                "\n[Tool {}] {}({})\n",
+                                id, function.name, function.arguments
+                            ));
+                        }
+                        WireEvent::ToolResult {
+                            tool_call_id,
+                            output: result,
+                            is_error,
+                            elapsed_ms,
+                        } => {
+                            output.push_str(&format!(
+                                "[Result {}] error={} elapsed={:?}\n{}\n",
+                                tool_call_id, is_error, elapsed_ms, result
+                            ));
                         }
                         WireEvent::SessionShutdown { reason } => {
                             output.push_str(&format!("\n[SessionShutdown: {}]\n", reason));
@@ -563,7 +628,8 @@ async fn main() -> anyhow::Result<()> {
                 reason: "print_mode_complete".into(),
             });
             hub.broadcast(wire::WireEvent::TurnEnd);
-            let output = tokio::time::timeout(std::time::Duration::from_secs(120), print_task).await;
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(120), print_task).await;
             match output {
                 Ok(Ok(text)) => println!("{}", text),
                 Ok(Err(e)) => eprintln!("Print task error: {}", e),
@@ -617,11 +683,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     if ui_shutdown_secs > 0 {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(ui_shutdown_secs),
-            ui_task,
-        )
-        .await
+        match tokio::time::timeout(std::time::Duration::from_secs(ui_shutdown_secs), ui_task).await
         {
             Ok(join) => {
                 let _ = join;

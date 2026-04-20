@@ -3,9 +3,9 @@
 //! `Toolset` holds registered tools and routes `ToolCall` requests to the
 //! correct implementation, injecting `ToolContext`.
 
-use std::collections::HashMap;
 use crate::tools::{Tool, ToolContext, ToolOutput};
 use serde_json::Value;
+use std::collections::HashMap;
 
 pub struct Toolset {
     tools: HashMap<String, Box<dyn Tool>>,
@@ -13,15 +13,24 @@ pub struct Toolset {
 
 impl Toolset {
     pub fn new() -> Self {
-        Self { tools: HashMap::new() }
+        Self {
+            tools: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    pub async fn handle(&self, name: &str, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        let tool = self.tools.get(name)
+    pub async fn handle(
+        &self,
+        name: &str,
+        args: Value,
+        ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let tool = self
+            .tools
+            .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?;
         tool.call(args, ctx).await
     }
@@ -41,8 +50,12 @@ mod tests {
 
     #[async_trait]
     impl Tool for DummyTool {
-        fn name(&self) -> &str { "dummy" }
-        fn description(&self) -> &str { "A dummy tool" }
+        fn name(&self) -> &str {
+            "dummy"
+        }
+        fn description(&self) -> &str {
+            "A dummy tool"
+        }
         fn schema(&self) -> Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
@@ -50,7 +63,9 @@ mod tests {
             Ok(ToolOutput {
                 result: crate::tools::ToolResult {
                     r#type: "success".to_string(),
-                    content: vec![crate::message::ContentBlock::Text { text: "ok".to_string() }],
+                    content: vec![crate::message::ContentBlock::Text {
+                        text: "ok".to_string(),
+                    }],
                     summary: "done".to_string(),
                 },
                 artifacts: vec![],
@@ -61,7 +76,11 @@ mod tests {
 
     fn test_ctx() -> ToolContext {
         let hub = crate::wire::RootWireHub::new();
-        let approval = std::sync::Arc::new(crate::approval::ApprovalRuntime::new(hub.clone(), true, vec![]));
+        let approval = std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+            hub.clone(),
+            true,
+            vec![],
+        ));
         let store = crate::store::Store::open(std::path::Path::new(":memory:")).unwrap();
         let runtime = crate::runtime::Runtime::new(
             crate::config::Config::default(),
@@ -70,7 +89,11 @@ mod tests {
             hub,
             store,
         );
-        ToolContext { runtime, hub: None, token: crate::token::ContextToken::new("test", "turn") }
+        ToolContext {
+            runtime,
+            hub: None,
+            token: crate::token::ContextToken::new("test", "turn"),
+        }
     }
 
     #[tokio::test]

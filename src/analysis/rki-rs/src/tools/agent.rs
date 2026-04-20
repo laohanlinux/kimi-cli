@@ -1,15 +1,19 @@
+use crate::agent::AgentSpec;
+use crate::subagents::ForegroundSubagentRunner;
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
-use crate::subagents::ForegroundSubagentRunner;
-use crate::agent::AgentSpec;
 
 pub struct AgentTool;
 
 #[async_trait]
 impl Tool for AgentTool {
-    fn name(&self) -> &str { "agent" }
-    fn description(&self) -> &str { "Create or resume a subagent" }
+    fn name(&self) -> &str {
+        "agent"
+    }
+    fn description(&self) -> &str {
+        "Create or resume a subagent"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -27,23 +31,41 @@ impl Tool for AgentTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let run_in_background = args.get("run_in_background").and_then(|v| v.as_bool()).unwrap_or(false);
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt = args
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let run_in_background = args
+            .get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         if run_in_background {
+            let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(300);
             let spec = crate::background::types::TaskSpec {
                 id: uuid::Uuid::new_v4().to_string(),
-                kind: crate::background::types::TaskKind::Agent { description, prompt },
+                kind: crate::background::types::TaskKind::Agent {
+                    description,
+                    prompt,
+                },
                 created_at: chrono::Utc::now(),
                 dependencies: vec![],
                 max_retries: 0,
+                timeout_s: Some(timeout),
             };
             let task_id = ctx.runtime.bg_manager.submit(spec).await?;
             return Ok(ToolOutput {
                 result: ToolResult {
                     r#type: "success".to_string(),
-                    content: vec![ContentBlock::Text { text: format!("Background agent task submitted: {}", task_id) }],
+                    content: vec![ContentBlock::Text {
+                        text: format!("Background agent task submitted: {}", task_id),
+                    }],
                     summary: "Background agent started".to_string(),
                 },
                 artifacts: vec![],
@@ -51,7 +73,10 @@ impl Tool for AgentTool {
             });
         }
 
-        let hub = ctx.hub.as_ref().ok_or_else(|| anyhow::anyhow!("No hub available for subagent"))?;
+        let hub = ctx
+            .hub
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No hub available for subagent"))?;
         let agent_spec = AgentSpec {
             name: "subagent".to_string(),
             system_prompt: "You are a helpful subagent.".to_string(),
@@ -60,7 +85,10 @@ impl Tool for AgentTool {
             ..Default::default()
         };
 
-        let parent_tool_call_id = ctx.token.tool_call_id.clone()
+        let parent_tool_call_id = ctx
+            .token
+            .tool_call_id
+            .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let result = ForegroundSubagentRunner::run(
             &ctx.runtime,
@@ -68,7 +96,8 @@ impl Tool for AgentTool {
             parent_tool_call_id,
             agent_spec,
             prompt,
-        ).await?;
+        )
+        .await?;
 
         Ok(ToolOutput {
             result: ToolResult {
@@ -85,12 +114,12 @@ impl Tool for AgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::Runtime;
-    use crate::config::Config;
     use crate::approval::ApprovalRuntime;
-    use crate::wire::RootWireHub;
+    use crate::config::Config;
+    use crate::runtime::Runtime;
     use crate::session::Session;
     use crate::store::Store;
+    use crate::wire::RootWireHub;
     use std::sync::Arc;
 
     fn test_ctx() -> ToolContext {
@@ -100,9 +129,15 @@ mod tests {
         let runtime = Runtime::new(
             Config::default(),
             Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-            approval, hub, store,
+            approval,
+            hub,
+            store,
         );
-        ToolContext { runtime, hub: None, token: crate::token::ContextToken::new("test", "turn") }
+        ToolContext {
+            runtime,
+            hub: None,
+            token: crate::token::ContextToken::new("test", "turn"),
+        }
     }
 
     #[tokio::test]

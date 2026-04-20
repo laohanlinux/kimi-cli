@@ -30,9 +30,19 @@ pub fn extract_constraints(_tool_name: &str, args: &Value) -> ConstraintContext 
             s.to_string()
         }
     });
-    let command = args.get("command").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let host = args.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-    ConstraintContext { path, command, host }
+    let command = args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let host = args
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    ConstraintContext {
+        path,
+        command,
+        host,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -123,7 +133,9 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     } else {
         pattern.to_string()
     };
-    let regex = regex::escape(&pattern).replace(r"\*", ".*").replace(r"\?", ".");
+    let regex = regex::escape(&pattern)
+        .replace(r"\*", ".*")
+        .replace(r"\?", ".");
     if let Ok(re) = regex::Regex::new(&format!("^{}$", regex)) {
         re.is_match(value)
     } else {
@@ -145,7 +157,10 @@ mod tests {
 
     #[test]
     fn test_capability_engine() {
-        let home = dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
+        let home = dirs::home_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let profile = TrustProfile {
             default: "prompt".to_string(),
             overrides: vec![
@@ -216,7 +231,10 @@ mod tests {
     fn test_tool_to_capability() {
         assert_eq!(tool_to_capability("shell"), Some("process:exec"));
         assert_eq!(tool_to_capability("write_file"), Some("filesystem:write"));
-        assert_eq!(tool_to_capability("str_replace_file"), Some("filesystem:write"));
+        assert_eq!(
+            tool_to_capability("str_replace_file"),
+            Some("filesystem:write")
+        );
         assert_eq!(tool_to_capability("read_file"), Some("filesystem:read"));
         assert_eq!(tool_to_capability("glob"), Some("filesystem:read"));
         assert_eq!(tool_to_capability("grep"), Some("filesystem:read"));
@@ -240,7 +258,10 @@ mod tests {
 
     #[test]
     fn test_extract_constraints_tilde_expansion() {
-        let home = dirs::home_dir().unwrap_or_default().to_string_lossy().to_string();
+        let home = dirs::home_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let args = serde_json::json!({"path": "~/Documents"});
         let ctx = extract_constraints("read_file", &args);
         assert_eq!(ctx.path, Some(format!("{}/Documents", home)));

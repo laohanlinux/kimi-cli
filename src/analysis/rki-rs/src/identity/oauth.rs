@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::identity::{Credential, IdentityProvider};
+use async_trait::async_trait;
 
 /// Kimi OAuth device flow provider.
 pub struct KimiOAuthProvider {
@@ -33,7 +33,10 @@ impl IdentityProvider for KimiOAuthProvider {
             .await?;
 
         if !resp.status().is_success() {
-            anyhow::bail!("OAuth device flow initiation failed: {}", resp.text().await?);
+            anyhow::bail!(
+                "OAuth device flow initiation failed: {}",
+                resp.text().await?
+            );
         }
 
         let data: serde_json::Value = resp.json().await?;
@@ -91,9 +94,10 @@ impl IdentityProvider for KimiOAuthProvider {
             }
 
             if let Some(error) = poll_data["error"].as_str()
-                && error != "authorization_pending" {
-                    anyhow::bail!("OAuth error: {}", error);
-                }
+                && error != "authorization_pending"
+            {
+                anyhow::bail!("OAuth error: {}", error);
+            }
         }
     }
 
@@ -129,9 +133,7 @@ impl IdentityProvider for KimiOAuthProvider {
             key: credential.key.clone(),
             value: access_token.to_string(),
             provider: credential.provider.clone(),
-            expires_at: Some(
-                chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64),
-            ),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64)),
             refresh_token: new_refresh.or_else(|| credential.refresh_token.clone()),
         })
     }

@@ -74,7 +74,8 @@ impl Context {
     }
 
     pub fn history(&self) -> Vec<Message> {
-        self.tree.linearize()
+        self.tree
+            .linearize()
             .into_iter()
             .filter_map(|msg| match msg {
                 // §6.4: Convert native ToolEvent to LLM-boundary Tool message
@@ -87,7 +88,10 @@ impl Context {
     }
 
     /// Attach a semantic embedding provider (§8.5). Used when `KIMI_EXPERIMENTAL_SEMANTIC_EMBEDDINGS` is enabled.
-    pub fn attach_semantic_embeddings(&mut self, provider: Arc<dyn crate::memory::EmbeddingProvider>) {
+    pub fn attach_semantic_embeddings(
+        &mut self,
+        provider: Arc<dyn crate::memory::EmbeddingProvider>,
+    ) {
         self.memory.attach_semantic_embeddings(provider);
     }
 
@@ -134,10 +138,8 @@ impl Context {
     }
 
     pub async fn revert_to(&mut self, checkpoint_id: u64) -> anyhow::Result<()> {
-        self.store.revert_context_to_checkpoint(
-            &self.session_id,
-            checkpoint_id as i64,
-        )?;
+        self.store
+            .revert_context_to_checkpoint(&self.session_id, checkpoint_id as i64)?;
         // Rebuild tree and memory from DB
         let rows = self.store.get_context(&self.session_id)?;
         let mut messages = Vec::new();
@@ -214,42 +216,66 @@ fn row_to_message(row: &crate::store::ContextRow) -> Option<Message> {
             Some(Message::User(um))
         }
         "assistant" => {
-            let tool_calls = row.metadata.as_ref().and_then(|m| {
-                let v: serde_json::Value = serde_json::from_str(m).ok()?;
-                v.get("tool_calls").cloned()
-            }).and_then(|tc| serde_json::from_value(tc).ok());
+            let tool_calls = row
+                .metadata
+                .as_ref()
+                .and_then(|m| {
+                    let v: serde_json::Value = serde_json::from_str(m).ok()?;
+                    v.get("tool_calls").cloned()
+                })
+                .and_then(|tc| serde_json::from_value(tc).ok());
             Some(Message::Assistant {
                 content: row.content.clone(),
                 tool_calls,
             })
         }
         "tool" => {
-            let tool_call_id = row.metadata.as_ref().and_then(|m| {
-                let v: serde_json::Value = serde_json::from_str(m).ok()?;
-                v.get("tool_call_id")
-                    .and_then(|t| t.as_str().map(|s| s.to_string()))
-            }).unwrap_or_default();
-            let content = row.content.as_ref().and_then(|c| {
-                serde_json::from_str::<Vec<crate::message::ContentBlock>>(c).ok()
-            }).unwrap_or_else(|| vec![crate::message::ContentBlock::Text { text: row.content.clone().unwrap_or_default() }]);
+            let tool_call_id = row
+                .metadata
+                .as_ref()
+                .and_then(|m| {
+                    let v: serde_json::Value = serde_json::from_str(m).ok()?;
+                    v.get("tool_call_id")
+                        .and_then(|t| t.as_str().map(|s| s.to_string()))
+                })
+                .unwrap_or_default();
+            let content = row
+                .content
+                .as_ref()
+                .and_then(|c| serde_json::from_str::<Vec<crate::message::ContentBlock>>(c).ok())
+                .unwrap_or_else(|| {
+                    vec![crate::message::ContentBlock::Text {
+                        text: row.content.clone().unwrap_or_default(),
+                    }]
+                });
             Some(Message::Tool {
                 tool_call_id,
                 content,
             })
         }
         "tool_event" => {
-            let ev = row.metadata.as_ref().and_then(|m| {
-                serde_json::from_str::<crate::message::ToolEvent>(m).ok()
-            })?;
+            let ev = row
+                .metadata
+                .as_ref()
+                .and_then(|m| serde_json::from_str::<crate::message::ToolEvent>(m).ok())?;
             Some(Message::ToolEvent(ev))
         }
         "_compaction" => {
             let summary = row.content.clone().unwrap_or_default();
-            let preserved = row.metadata.as_ref().and_then(|m| {
-                let v: serde_json::Value = serde_json::from_str(m).ok()?;
-                v.get("preserved_turns").and_then(|t| t.as_u64()).map(|n| n as usize)
-            }).unwrap_or(0);
-            Some(Message::Compaction { summary, preserved_turns: preserved })
+            let preserved = row
+                .metadata
+                .as_ref()
+                .and_then(|m| {
+                    let v: serde_json::Value = serde_json::from_str(m).ok()?;
+                    v.get("preserved_turns")
+                        .and_then(|t| t.as_u64())
+                        .map(|n| n as usize)
+                })
+                .unwrap_or(0);
+            Some(Message::Compaction {
+                summary,
+                preserved_turns: preserved,
+            })
         }
         "_system_prompt" => Some(Message::SystemPrompt {
             content: row.content.clone()?,
@@ -264,8 +290,15 @@ fn row_to_message(row: &crate::store::ContextRow) -> Option<Message> {
     }
 }
 
-
-fn message_to_row(msg: &Message) -> (String, Option<String>, Option<String>, Option<i64>, Option<i64>) {
+fn message_to_row(
+    msg: &Message,
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+) {
     match msg {
         Message::System { content } => (
             "system".to_string(),
@@ -281,46 +314,32 @@ fn message_to_row(msg: &Message) -> (String, Option<String>, Option<String>, Opt
             None,
             None,
         ),
-        Message::Assistant { content, tool_calls } => {
-            let meta = tool_calls.as_ref().map(|tc| {
-                serde_json::json!({ "tool_calls": tc }).to_string()
-            });
-            (
-                "assistant".to_string(),
-                content.clone(),
-                meta,
-                None,
-                None,
-            )
+        Message::Assistant {
+            content,
+            tool_calls,
+        } => {
+            let meta = tool_calls
+                .as_ref()
+                .map(|tc| serde_json::json!({ "tool_calls": tc }).to_string());
+            ("assistant".to_string(), content.clone(), meta, None, None)
         }
         Message::Tool {
             tool_call_id,
             content,
         } => {
-            let meta = Some(
-                serde_json::json!({ "tool_call_id": tool_call_id }).to_string(),
-            );
+            let meta = Some(serde_json::json!({ "tool_call_id": tool_call_id }).to_string());
             let content_json = serde_json::to_string(content).ok();
-            (
-                "tool".to_string(),
-                content_json,
-                meta,
-                None,
-                None,
-            )
+            ("tool".to_string(), content_json, meta, None, None)
         }
         Message::ToolEvent(ev) => {
             let meta = serde_json::to_string(ev).ok();
             let content_json = serde_json::to_string(&ev.content).ok();
-            (
-                "tool_event".to_string(),
-                content_json,
-                meta,
-                None,
-                None,
-            )
+            ("tool_event".to_string(), content_json, meta, None, None)
         }
-        Message::Compaction { summary, preserved_turns } => {
+        Message::Compaction {
+            summary,
+            preserved_turns,
+        } => {
             let meta = Some(serde_json::json!({ "preserved_turns": preserved_turns }).to_string());
             (
                 "_compaction".to_string(),
@@ -374,7 +393,12 @@ mod tests {
             ))))
             .await
             .unwrap();
-            ctx.append(Message::Assistant { content: Some(format!("reply {}", i)), tool_calls: None }).await.unwrap();
+            ctx.append(Message::Assistant {
+                content: Some(format!("reply {}", i)),
+                tool_calls: None,
+            })
+            .await
+            .unwrap();
         }
 
         // Compact to move messages into episodic/semantic memory
@@ -386,7 +410,10 @@ mod tests {
             Message::System { content } => content.contains("Relevant context from memory"),
             _ => false,
         });
-        assert!(has_recall, "Expected memory recall to be injected into history");
+        assert!(
+            has_recall,
+            "Expected memory recall to be injected into history"
+        );
     }
 
     #[tokio::test]
@@ -403,7 +430,10 @@ mod tests {
             Message::System { content } => content.contains("Relevant context from memory"),
             _ => false,
         });
-        assert!(!has_recall, "Expected no memory recall for completely empty memory");
+        assert!(
+            !has_recall,
+            "Expected no memory recall for completely empty memory"
+        );
     }
 
     #[tokio::test]
@@ -428,7 +458,9 @@ mod tests {
         ctx.append(Message::Tool {
             tool_call_id: "tc-1".to_string(),
             content: structured_content.clone(),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Reload and verify structure is preserved
         let ctx2 = Context::load(&store, session_id).await.unwrap();
@@ -462,23 +494,41 @@ mod tests {
             tool_name: "shell".to_string(),
             status: crate::message::ToolStatus::Completed,
             content: vec![
-                crate::message::ContentBlock::Text { text: "hello".to_string() },
-                crate::message::ContentBlock::Code { language: Some("sh".to_string()), code: "echo hello".to_string() },
+                crate::message::ContentBlock::Text {
+                    text: "hello".to_string(),
+                },
+                crate::message::ContentBlock::Code {
+                    language: Some("sh".to_string()),
+                    code: "echo hello".to_string(),
+                },
             ],
-            metrics: Some(crate::message::ToolMetrics { elapsed_ms: 120, exit_code: Some(0) }),
+            metrics: Some(crate::message::ToolMetrics {
+                elapsed_ms: 120,
+                exit_code: Some(0),
+            }),
             elapsed_ms: Some(120),
         };
         ctx.append(Message::ToolEvent(ev.clone())).await.unwrap();
 
         // Raw tree stores the native ToolEvent
         let raw = ctx.tree.linearize();
-        assert!(matches!(&raw[0], Message::ToolEvent(_)), "Expected ToolEvent in raw tree");
+        assert!(
+            matches!(&raw[0], Message::ToolEvent(_)),
+            "Expected ToolEvent in raw tree"
+        );
 
         // History converts ToolEvent -> Tool for LLM boundary
         let history = ctx.history();
         let tool_msg = history.iter().find(|m| matches!(m, Message::Tool { .. }));
-        assert!(tool_msg.is_some(), "Expected Tool message in history after conversion");
-        if let Message::Tool { tool_call_id, content } = tool_msg.unwrap() {
+        assert!(
+            tool_msg.is_some(),
+            "Expected Tool message in history after conversion"
+        );
+        if let Message::Tool {
+            tool_call_id,
+            content,
+        } = tool_msg.unwrap()
+        {
             assert_eq!(tool_call_id, "tc-42");
             assert_eq!(content.len(), 2);
         }
@@ -486,7 +536,10 @@ mod tests {
         // Reload and verify persistence roundtrip
         let ctx2 = Context::load(&store, session_id).await.unwrap();
         let raw2 = ctx2.tree.linearize();
-        assert!(matches!(&raw2[0], Message::ToolEvent(_)), "Expected ToolEvent after reload");
+        assert!(
+            matches!(&raw2[0], Message::ToolEvent(_)),
+            "Expected ToolEvent after reload"
+        );
         if let Message::ToolEvent(ev2) = &raw2[0] {
             assert_eq!(ev2.tool_call_id, "tc-42");
             assert_eq!(ev2.tool_name, "shell");
@@ -503,21 +556,37 @@ mod tests {
         store.create_session(session_id, "/tmp").unwrap();
 
         let mut ctx = Context::load(&store, session_id).await.unwrap();
-        ctx.append(Message::Compaction { summary: "Summarized 10 messages".to_string(), preserved_turns: 2 }).await.unwrap();
+        ctx.append(Message::Compaction {
+            summary: "Summarized 10 messages".to_string(),
+            preserved_turns: 2,
+        })
+        .await
+        .unwrap();
 
         // Compaction markers are skipped in LLM history
         let history = ctx.history();
-        assert!(history.iter().all(|m| !matches!(m, Message::Compaction { .. })),
-            "Compaction markers should not appear in LLM history");
+        assert!(
+            history
+                .iter()
+                .all(|m| !matches!(m, Message::Compaction { .. })),
+            "Compaction markers should not appear in LLM history"
+        );
 
         // But preserved in raw storage
         let raw = ctx.tree.linearize();
-        assert!(matches!(&raw[0], Message::Compaction { .. }), "Expected Compaction in raw tree");
+        assert!(
+            matches!(&raw[0], Message::Compaction { .. }),
+            "Expected Compaction in raw tree"
+        );
 
         // Reload roundtrip
         let ctx2 = Context::load(&store, session_id).await.unwrap();
         let raw2 = ctx2.tree.linearize();
-        if let Message::Compaction { summary, preserved_turns } = &raw2[0] {
+        if let Message::Compaction {
+            summary,
+            preserved_turns,
+        } = &raw2[0]
+        {
             assert_eq!(summary, "Summarized 10 messages");
             assert_eq!(*preserved_turns, 2);
         }
@@ -533,10 +602,18 @@ mod tests {
 
         // Add enough messages to trigger compaction interest
         for i in 0..10 {
-            ctx.append(Message::User(crate::message::UserMessage::text(format!("msg{}", i))))
-                .await
-                .unwrap();
-            ctx.append(Message::Assistant { content: Some(format!("reply{}", i)), tool_calls: None }).await.unwrap();
+            ctx.append(Message::User(crate::message::UserMessage::text(format!(
+                "msg{}",
+                i
+            ))))
+            .await
+            .unwrap();
+            ctx.append(Message::Assistant {
+                content: Some(format!("reply{}", i)),
+                tool_calls: None,
+            })
+            .await
+            .unwrap();
         }
 
         let before_len = ctx.history().len();
@@ -546,7 +623,10 @@ mod tests {
 
         let after_len = ctx.history().len();
         // SimpleCompaction preserves last 4 messages + 1 summary = 5
-        assert_eq!(after_len, 5, "Expected compaction to reduce history to 5 messages");
+        assert_eq!(
+            after_len, 5,
+            "Expected compaction to reduce history to 5 messages"
+        );
 
         // First message should be the summary
         assert!(matches!(ctx.history()[0], Message::System { .. }));

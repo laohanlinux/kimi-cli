@@ -2,10 +2,10 @@
 //!
 //! `InjectionEngine` collects reminders from registered providers.
 
-use async_trait::async_trait;
-use std::sync::Arc;
 use crate::message::Message;
 use crate::runtime::Runtime;
+use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Dynamic system reminder injected into context based on runtime state.
 #[async_trait]
@@ -54,7 +54,9 @@ pub struct InjectionEngine {
 
 impl InjectionEngine {
     pub fn new() -> Self {
-        Self { providers: Vec::new() }
+        Self {
+            providers: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, provider: Arc<dyn InjectionProvider>) {
@@ -77,7 +79,11 @@ mod tests {
 
     fn test_runtime() -> Runtime {
         let hub = crate::wire::RootWireHub::new();
-        let approval = Arc::new(crate::approval::ApprovalRuntime::new(hub.clone(), true, vec![]));
+        let approval = Arc::new(crate::approval::ApprovalRuntime::new(
+            hub.clone(),
+            true,
+            vec![],
+        ));
         let store = crate::store::Store::open(std::path::Path::new(":memory:")).unwrap();
         Runtime::new(
             crate::config::Config::default(),
@@ -134,7 +140,11 @@ mod tests {
     #[tokio::test]
     async fn test_yolo_injection_inactive() {
         let hub = crate::wire::RootWireHub::new();
-        let approval = Arc::new(crate::approval::ApprovalRuntime::new(hub.clone(), false, vec![]));
+        let approval = Arc::new(crate::approval::ApprovalRuntime::new(
+            hub.clone(),
+            false,
+            vec![],
+        ));
         let store = crate::store::Store::open(std::path::Path::new(":memory:")).unwrap();
         let rt = Runtime::new(
             crate::config::Config::default(),

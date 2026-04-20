@@ -1,15 +1,18 @@
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
 use tokio::process::Command;
 
 pub struct ShellTool;
 
-
 #[async_trait]
 impl Tool for ShellTool {
-    fn name(&self) -> &str { "shell" }
-    fn description(&self) -> &str { "Execute shell commands" }
+    fn name(&self) -> &str {
+        "shell"
+    }
+    fn description(&self) -> &str {
+        "Execute shell commands"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -28,18 +31,24 @@ impl Tool for ShellTool {
         if command.is_empty() {
             anyhow::bail!("Empty command");
         }
-        let approved = ctx.runtime.approval.request_tool(
-            "".to_string(),
-            "shell",
-            &args,
-            command.to_string(),
-            command.to_string(),
-        ).await?;
+        let approved = ctx
+            .runtime
+            .approval
+            .request_tool(
+                "".to_string(),
+                "shell",
+                &args,
+                command.to_string(),
+                command.to_string(),
+            )
+            .await?;
         if !approved {
             return Ok(ToolOutput {
                 result: ToolResult {
                     r#type: "error".to_string(),
-                    content: vec![ContentBlock::Text { text: "Approval rejected".to_string() }],
+                    content: vec![ContentBlock::Text {
+                        text: "Approval rejected".to_string(),
+                    }],
                     summary: "Approval rejected".to_string(),
                 },
                 artifacts: vec![],
@@ -50,7 +59,8 @@ impl Tool for ShellTool {
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
             Command::new("sh").arg("-c").arg(command).output(),
-        ).await??;
+        )
+        .await??;
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -58,18 +68,35 @@ impl Tool for ShellTool {
         let success = output.status.success();
         let exit_code = output.status.code();
         let summary = if success {
-            format!("Command succeeded with exit code {}", exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()))
+            format!(
+                "Command succeeded with exit code {}",
+                exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
         } else {
-            format!("Command failed with exit code {}", exit_code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()))
+            format!(
+                "Command failed with exit code {}",
+                exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
         };
         Ok(ToolOutput {
             result: ToolResult {
-                r#type: if success { "success".to_string() } else { "error".to_string() },
+                r#type: if success {
+                    "success".to_string()
+                } else {
+                    "error".to_string()
+                },
                 content: vec![ContentBlock::Text { text }],
                 summary,
             },
             artifacts: vec![],
-            metrics: ToolMetrics { elapsed_ms, exit_code },
+            metrics: ToolMetrics {
+                elapsed_ms,
+                exit_code,
+            },
         })
     }
 }
@@ -77,10 +104,10 @@ impl Tool for ShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::Runtime;
-    use crate::config::Config;
-    use crate::session::Session;
     use crate::approval::ApprovalRuntime;
+    use crate::config::Config;
+    use crate::runtime::Runtime;
+    use crate::session::Session;
     use crate::wire::RootWireHub;
     use std::sync::Arc;
 
@@ -95,7 +122,11 @@ mod tests {
             hub,
             store,
         );
-        ToolContext { runtime, hub: None, token: crate::token::ContextToken::new("test", "test-turn") }
+        ToolContext {
+            runtime,
+            hub: None,
+            token: crate::token::ContextToken::new("test", "test-turn"),
+        }
     }
 
     #[tokio::test]
@@ -105,7 +136,12 @@ mod tests {
         let args = serde_json::json!({ "command": "echo hello_rki" });
         let output = tool.call(args, &ctx).await.unwrap();
         assert_eq!(output.result.r#type, "success");
-        assert!(output.result.summary.contains("Command succeeded with exit code 0"));
+        assert!(
+            output
+                .result
+                .summary
+                .contains("Command succeeded with exit code 0")
+        );
         if let ContentBlock::Text { text } = &output.result.content[0] {
             assert!(text.contains("hello_rki"));
         }
@@ -127,7 +163,12 @@ mod tests {
         let args = serde_json::json!({ "command": "exit 1" });
         let output = tool.call(args, &ctx).await.unwrap();
         assert_eq!(output.result.r#type, "error");
-        assert!(output.result.summary.contains("Command failed with exit code 1"));
+        assert!(
+            output
+                .result
+                .summary
+                .contains("Command failed with exit code 1")
+        );
     }
 
     #[tokio::test]

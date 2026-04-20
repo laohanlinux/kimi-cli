@@ -1,9 +1,11 @@
-use async_trait::async_trait;
 use crate::llm::{ChatProvider, HttpGeneration, StreamingGeneration};
-use crate::message::{content_to_string, ContentPart, FunctionCall, Message, ToolCall, UserMessage};
-use reqwest::Client;
-use futures::StreamExt;
+use crate::message::{
+    ContentPart, FunctionCall, Message, ToolCall, UserMessage, content_to_string,
+};
+use async_trait::async_trait;
 use eventsource_stream::Eventsource;
+use futures::StreamExt;
+use reqwest::Client;
 
 pub struct OpenAIProvider {
     client: Client,
@@ -56,7 +58,7 @@ fn openai_user_content(u: &UserMessage) -> serde_json::Value {
         return serde_json::Value::String(String::new());
     }
     if blocks.len() == 1 {
-            if let Some(obj) = blocks[0].as_object() {
+        if let Some(obj) = blocks[0].as_object() {
             if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
                 return blocks[0]["text"].clone();
             }
@@ -79,7 +81,10 @@ fn build_messages(system_prompt: Option<String>, history: Vec<Message>) -> Vec<s
                 let content = openai_user_content(&u);
                 messages.push(serde_json::json!({"role": "user", "content": content}));
             }
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let mut m = serde_json::json!({"role": "assistant"});
                 if let Some(c) = content {
                     m["content"] = serde_json::Value::String(c);
@@ -102,7 +107,10 @@ fn build_messages(system_prompt: Option<String>, history: Vec<Message>) -> Vec<s
                 }
                 messages.push(m);
             }
-            Message::Tool { tool_call_id, content } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => {
                 let text = content_to_string(&content);
                 messages.push(serde_json::json!({
                     "role": "tool",
@@ -175,9 +183,12 @@ async fn non_streaming(
 
     let mut chunks = Vec::new();
     if let Some(text) = message["content"].as_str()
-        && !text.is_empty() {
-            chunks.push(ContentPart::Text { text: text.to_string() });
-        }
+        && !text.is_empty()
+    {
+        chunks.push(ContentPart::Text {
+            text: text.to_string(),
+        });
+    }
 
     let mut tool_calls = Vec::new();
     if let Some(tcs) = message["tool_calls"].as_array() {
@@ -187,7 +198,10 @@ async fn non_streaming(
                 kind: tc["type"].as_str().unwrap_or("function").to_string(),
                 function: FunctionCall {
                     name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                    arguments: tc["function"]["arguments"].as_str().unwrap_or("").to_string(),
+                    arguments: tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
                 },
             });
         }
@@ -240,9 +254,14 @@ async fn streaming(
                     }
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data)
                         && let Some(text) = data["choices"][0]["delta"]["content"].as_str()
-                            && !text.is_empty() {
-                                let _ = tx.send(ContentPart::Text { text: text.to_string() }).await;
-                            }
+                        && !text.is_empty()
+                    {
+                        let _ = tx
+                            .send(ContentPart::Text {
+                                text: text.to_string(),
+                            })
+                            .await;
+                    }
                 }
                 Err(_) => break,
             }
@@ -276,7 +295,9 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 tool_name: "shell".to_string(),
                 status: ToolStatus::Completed,
-                content: vec![ContentBlock::Text { text: "output".to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: "output".to_string(),
+                }],
                 metrics: None,
                 elapsed_ms: None,
             })],
@@ -310,10 +331,7 @@ mod tests {
 
     #[test]
     fn test_build_messages_no_system_prompt() {
-        let msgs = build_messages(
-            None,
-            vec![Message::User(UserMessage::text("hi"))],
-        );
+        let msgs = build_messages(None, vec![Message::User(UserMessage::text("hi"))]);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["role"], "user");
     }

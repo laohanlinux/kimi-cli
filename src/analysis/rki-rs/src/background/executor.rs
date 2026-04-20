@@ -1,7 +1,7 @@
-use async_trait::async_trait;
-use crate::background::types::{TaskSpec, TaskEvent, TaskKind};
+use crate::background::types::{TaskEvent, TaskKind, TaskSpec};
 use crate::runtime::Runtime;
 use crate::wire::RootWireHub;
+use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -59,7 +59,6 @@ impl TaskExecutor for BashExecutor {
     }
 }
 
-
 /// Executor for agent background tasks. Spawns a nested KimiSoul.
 pub struct AgentExecutor {
     runtime: Runtime,
@@ -79,7 +78,11 @@ impl TaskExecutor for AgentExecutor {
 
     async fn execute(&self, spec: &TaskSpec) -> Vec<TaskEvent> {
         let mut events = vec![TaskEvent::Started];
-        if let TaskKind::Agent { description: _, prompt } = &spec.kind {
+        if let TaskKind::Agent {
+            description: _,
+            prompt,
+        } = &spec.kind
+        {
             let hub = RootWireHub::new();
             let approval = Arc::new(crate::approval::ApprovalRuntime::new(
                 hub.clone(),
@@ -97,10 +100,14 @@ impl TaskExecutor for AgentExecutor {
                 self.runtime.store.clone(),
             );
             let context = Arc::new(Mutex::new(
-                match crate::context::Context::load(&sub_runtime.store, &sub_runtime.session.id).await {
+                match crate::context::Context::load(&sub_runtime.store, &sub_runtime.session.id)
+                    .await
+                {
                     Ok(c) => c,
                     Err(e) => {
-                        events.push(TaskEvent::Failed { reason: format!("Context load failed: {}", e) });
+                        events.push(TaskEvent::Failed {
+                            reason: format!("Context load failed: {}", e),
+                        });
                         return events;
                     }
                 },
@@ -135,7 +142,9 @@ impl TaskExecutor for AgentExecutor {
             events.push(TaskEvent::Output { text });
             match result {
                 Ok(_) => events.push(TaskEvent::Completed { exit_code: Some(0) }),
-                Err(e) => events.push(TaskEvent::Failed { reason: e.to_string() }),
+                Err(e) => events.push(TaskEvent::Failed {
+                    reason: e.to_string(),
+                }),
             }
         }
         events
@@ -151,18 +160,26 @@ mod tests {
         let exec = BashExecutor;
         let spec = TaskSpec {
             id: "t1".to_string(),
-            kind: TaskKind::Bash { command: "echo hello_executor".to_string() },
+            kind: TaskKind::Bash {
+                command: "echo hello_executor".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         assert!(exec.can_execute(&spec));
 
         let events = exec.execute(&spec).await;
         assert!(matches!(&events[0], TaskEvent::Started));
-        let has_output = events.iter().any(|e| matches!(e, TaskEvent::Output { text } if text.contains("hello_executor")));
+        let has_output = events
+            .iter()
+            .any(|e| matches!(e, TaskEvent::Output { text } if text.contains("hello_executor")));
         assert!(has_output);
-        assert!(matches!(events.last().unwrap(), TaskEvent::Completed { exit_code: Some(0) }));
+        assert!(matches!(
+            events.last().unwrap(),
+            TaskEvent::Completed { exit_code: Some(0) }
+        ));
     }
 
     #[tokio::test]
@@ -170,13 +187,19 @@ mod tests {
         let exec = BashExecutor;
         let spec = TaskSpec {
             id: "t2".to_string(),
-            kind: TaskKind::Bash { command: "exit 7".to_string() },
+            kind: TaskKind::Bash {
+                command: "exit 7".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         let events = exec.execute(&spec).await;
-        assert!(matches!(events.last().unwrap(), TaskEvent::Completed { exit_code: Some(7) }));
+        assert!(matches!(
+            events.last().unwrap(),
+            TaskEvent::Completed { exit_code: Some(7) }
+        ));
     }
 
     #[tokio::test]
@@ -184,10 +207,14 @@ mod tests {
         let exec = BashExecutor;
         let spec = TaskSpec {
             id: "t3".to_string(),
-            kind: TaskKind::Agent { description: "d".to_string(), prompt: "p".to_string() },
+            kind: TaskKind::Agent {
+                description: "d".to_string(),
+                prompt: "p".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         assert!(!exec.can_execute(&spec));
     }
@@ -197,32 +224,50 @@ mod tests {
         let exec = BashExecutor;
         let spec = TaskSpec {
             id: "t4".to_string(),
-            kind: TaskKind::Bash { command: "true".to_string() },
+            kind: TaskKind::Bash {
+                command: "true".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         let events = exec.execute(&spec).await;
         assert!(matches!(&events[0], TaskEvent::Started));
         // true produces no output, so last event should be Completed
-        assert!(matches!(events.last().unwrap(), TaskEvent::Completed { exit_code: Some(0) }));
+        assert!(matches!(
+            events.last().unwrap(),
+            TaskEvent::Completed { exit_code: Some(0) }
+        ));
     }
 
     #[tokio::test]
     async fn test_agent_executor_can_run_agent() {
         let exec = AgentExecutor::new(crate::runtime::Runtime::new(
             crate::config::Config::default(),
-            crate::session::Session::create(&crate::store::Store::open(std::path::Path::new(":memory:")).unwrap(), std::env::current_dir().unwrap()).unwrap(),
-            std::sync::Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+            crate::session::Session::create(
+                &crate::store::Store::open(std::path::Path::new(":memory:")).unwrap(),
+                std::env::current_dir().unwrap(),
+            )
+            .unwrap(),
+            std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                crate::wire::RootWireHub::new(),
+                true,
+                vec![],
+            )),
             crate::wire::RootWireHub::new(),
             crate::store::Store::open(std::path::Path::new(":memory:")).unwrap(),
         ));
         let spec = TaskSpec {
             id: "t5".to_string(),
-            kind: TaskKind::Agent { description: "d".to_string(), prompt: "p".to_string() },
+            kind: TaskKind::Agent {
+                description: "d".to_string(),
+                prompt: "p".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         assert!(exec.can_execute(&spec));
     }

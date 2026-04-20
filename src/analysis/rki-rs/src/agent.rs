@@ -56,7 +56,10 @@ impl AgentSpec {
         Self::load_with_seen(path, &mut std::collections::HashSet::new())
     }
 
-    fn load_with_seen(path: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> anyhow::Result<Self> {
+    fn load_with_seen(
+        path: &Path,
+        seen: &mut std::collections::HashSet<PathBuf>,
+    ) -> anyhow::Result<Self> {
         let canonical = std::fs::canonicalize(path)?;
         if !seen.insert(canonical.clone()) {
             anyhow::bail!("Circular extend detected in agent spec: {:?}", path);
@@ -64,7 +67,7 @@ impl AgentSpec {
 
         let content = std::fs::read_to_string(path)?;
         let raw: serde_yaml::Value = serde_yaml::from_str(&content)?;
-        
+
         // Extract the "agent" key if present, else treat whole doc as agent
         let agent_value = raw.get("agent").cloned().unwrap_or(raw);
         let mut raw_spec: RawAgentSpec = serde_yaml::from_value(agent_value)?;
@@ -148,7 +151,9 @@ pub struct LaborMarket {
 
 impl LaborMarket {
     pub fn new() -> Self {
-        Self { subagent_types: HashMap::new() }
+        Self {
+            subagent_types: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, name: String, spec: AgentSpec) {
@@ -211,7 +216,10 @@ mod tests {
             capabilities: vec![],
             subagents: HashMap::new(),
         };
-        let agent = Agent { spec: spec.clone(), system_prompt: "rendered".to_string() };
+        let agent = Agent {
+            spec: spec.clone(),
+            system_prompt: "rendered".to_string(),
+        };
         assert_eq!(agent.spec.name, "a");
         assert_eq!(agent.system_prompt, "rendered");
     }
@@ -225,7 +233,13 @@ mod tests {
     #[test]
     fn test_agent_debug_format() {
         let agent = Agent {
-            spec: AgentSpec { name: "test".to_string(), system_prompt: "sys".to_string(), tools: vec![], capabilities: vec![], subagents: HashMap::new() },
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "sys".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                subagents: HashMap::new(),
+            },
             system_prompt: "rendered".to_string(),
         };
         let debug = format!("{:?}", agent);
@@ -237,13 +251,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let yaml_path = dir.path().join("agent.yaml");
         let mut f = std::fs::File::create(&yaml_path).unwrap();
-        f.write_all(b"agent:
+        f.write_all(
+            b"agent:
   name: test-agent
   system_prompt_path: ./system.md
   tools:
     - shell
-").unwrap();
-        
+",
+        )
+        .unwrap();
+
         let system_path = dir.path().join("system.md");
         let mut sf = std::fs::File::create(&system_path).unwrap();
         sf.write_all(b"Hello ${NAME}!").unwrap();
@@ -257,20 +274,24 @@ mod tests {
     #[test]
     fn test_agent_spec_yaml_extend() {
         let dir = tempfile::tempdir().unwrap();
-        
+
         let base_yaml = dir.path().join("base.yaml");
         let mut f = std::fs::File::create(&base_yaml).unwrap();
-        f.write_all(b"agent:
+        f.write_all(
+            b"agent:
   name: base
   tools:
     - shell
   capabilities:
     - fs:read
-").unwrap();
-        
+",
+        )
+        .unwrap();
+
         let child_yaml = dir.path().join("child.yaml");
         let mut f = std::fs::File::create(&child_yaml).unwrap();
-        f.write_all(b"agent:
+        f.write_all(
+            b"agent:
   extend: ./base.yaml
   tools:
     - read_file
@@ -278,7 +299,9 @@ mod tests {
     coder:
       path: ./coder.yaml
       description: A coder
-").unwrap();
+",
+        )
+        .unwrap();
 
         let spec = AgentSpec::from_yaml(&child_yaml).unwrap();
         assert_eq!(spec.name, "base"); // inherited
@@ -356,15 +379,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.yaml");
         let b = dir.path().join("b.yaml");
-        
+
         let mut f = std::fs::File::create(&a).unwrap();
-        f.write_all(b"agent:
+        f.write_all(
+            b"agent:
   extend: ./b.yaml
-").unwrap();
+",
+        )
+        .unwrap();
         let mut f = std::fs::File::create(&b).unwrap();
-        f.write_all(b"agent:
+        f.write_all(
+            b"agent:
   extend: ./a.yaml
-").unwrap();
+",
+        )
+        .unwrap();
 
         assert!(AgentSpec::from_yaml(&a).is_err());
     }

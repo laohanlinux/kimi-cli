@@ -1,3 +1,4 @@
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -6,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
 
 /// Registry of built-in tools addressable by manifest `python_class` / `rust_type` entries.
 /// Maps "module:class" → factory function that produces a `Box<dyn Tool>`.
@@ -15,22 +15,56 @@ static BUILTIN_REGISTRY: OnceLock<HashMap<String, fn() -> Box<dyn Tool>>> = Once
 /// Initialize the built-in tool registry with known tools.
 fn init_builtin_registry() -> HashMap<String, fn() -> Box<dyn Tool>> {
     let mut reg: HashMap<String, fn() -> Box<dyn Tool>> = HashMap::new();
-    reg.insert("rki_rs::tools::shell::ShellTool".to_string(), || Box::new(crate::tools::ShellTool));
-    reg.insert("rki_rs::tools::file::ReadFileTool".to_string(), || Box::new(crate::tools::ReadFileTool));
-    reg.insert("rki_rs::tools::file::WriteFileTool".to_string(), || Box::new(crate::tools::WriteFileTool));
-    reg.insert("rki_rs::tools::file::StrReplaceFileTool".to_string(), || Box::new(crate::tools::StrReplaceFileTool));
-    reg.insert("rki_rs::tools::web::SearchWebTool".to_string(), || Box::new(crate::tools::SearchWebTool));
-    reg.insert("rki_rs::tools::web::FetchURLTool".to_string(), || Box::new(crate::tools::FetchURLTool));
-    reg.insert("rki_rs::tools::misc::ThinkTool".to_string(), || Box::new(crate::tools::ThinkTool));
-    reg.insert("rki_rs::tools::task::TaskListTool".to_string(), || Box::new(crate::tools::TaskListTool));
-    reg.insert("rki_rs::tools::task::TaskOutputTool".to_string(), || Box::new(crate::tools::TaskOutputTool));
-    reg.insert("rki_rs::tools::task::TaskStopTool".to_string(), || Box::new(crate::tools::TaskStopTool));
-    reg.insert("rki_rs::tools::misc::SetTodoListTool".to_string(), || Box::new(crate::tools::set_todo_list_tool()));
-    reg.insert("rki_rs::tools::misc::AskUserQuestionTool".to_string(), || Box::new(crate::tools::AskUserQuestionTool));
-    reg.insert("rki_rs::tools::misc::SendDMailTool".to_string(), || Box::new(crate::tools::send_dmail_tool()));
-    reg.insert("rki_rs::tools::agent::AgentTool".to_string(), || Box::new(crate::tools::AgentTool));
-    reg.insert("rki_rs::tools::plan::EnterPlanModeTool".to_string(), || Box::new(crate::tools::enter_plan_mode_tool()));
-    reg.insert("rki_rs::tools::plan::ExitPlanModeTool".to_string(), || Box::new(crate::tools::exit_plan_mode_tool()));
+    reg.insert("rki_rs::tools::shell::ShellTool".to_string(), || {
+        Box::new(crate::tools::ShellTool)
+    });
+    reg.insert("rki_rs::tools::file::ReadFileTool".to_string(), || {
+        Box::new(crate::tools::ReadFileTool)
+    });
+    reg.insert("rki_rs::tools::file::WriteFileTool".to_string(), || {
+        Box::new(crate::tools::WriteFileTool)
+    });
+    reg.insert(
+        "rki_rs::tools::file::StrReplaceFileTool".to_string(),
+        || Box::new(crate::tools::StrReplaceFileTool),
+    );
+    reg.insert("rki_rs::tools::web::SearchWebTool".to_string(), || {
+        Box::new(crate::tools::SearchWebTool)
+    });
+    reg.insert("rki_rs::tools::web::FetchURLTool".to_string(), || {
+        Box::new(crate::tools::FetchURLTool)
+    });
+    reg.insert("rki_rs::tools::misc::ThinkTool".to_string(), || {
+        Box::new(crate::tools::ThinkTool)
+    });
+    reg.insert("rki_rs::tools::task::TaskListTool".to_string(), || {
+        Box::new(crate::tools::TaskListTool)
+    });
+    reg.insert("rki_rs::tools::task::TaskOutputTool".to_string(), || {
+        Box::new(crate::tools::TaskOutputTool)
+    });
+    reg.insert("rki_rs::tools::task::TaskStopTool".to_string(), || {
+        Box::new(crate::tools::TaskStopTool)
+    });
+    reg.insert("rki_rs::tools::misc::SetTodoListTool".to_string(), || {
+        Box::new(crate::tools::set_todo_list_tool())
+    });
+    reg.insert(
+        "rki_rs::tools::misc::AskUserQuestionTool".to_string(),
+        || Box::new(crate::tools::AskUserQuestionTool),
+    );
+    reg.insert("rki_rs::tools::misc::SendDMailTool".to_string(), || {
+        Box::new(crate::tools::send_dmail_tool())
+    });
+    reg.insert("rki_rs::tools::agent::AgentTool".to_string(), || {
+        Box::new(crate::tools::AgentTool)
+    });
+    reg.insert("rki_rs::tools::plan::EnterPlanModeTool".to_string(), || {
+        Box::new(crate::tools::enter_plan_mode_tool())
+    });
+    reg.insert("rki_rs::tools::plan::ExitPlanModeTool".to_string(), || {
+        Box::new(crate::tools::exit_plan_mode_tool())
+    });
     reg
 }
 
@@ -147,39 +181,41 @@ impl Tool for ManifestTool {
     }
 
     fn schema(&self) -> Value {
-        self.manifest.parameters.clone().unwrap_or_else(|| {
-            serde_json::json!({ "type": "object", "properties": {} })
-        })
+        self.manifest
+            .parameters
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }))
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         if let Some(ref approval) = self.manifest.approval
-            && approval.required {
-                let approved = ctx
-                    .runtime
-                    .approval
-                    .request_tool(
-                        "".to_string(),
-                        &self.manifest.name,
-                        &args,
-                        format!("Run {} tool", self.manifest.name),
-                        format!("Run {} tool", self.manifest.name),
-                    )
-                    .await?;
-                if !approved {
-                    return Ok(ToolOutput {
-                        result: ToolResult {
-                            r#type: "error".to_string(),
-                            content: vec![ContentBlock::Text {
-                                text: "Approval rejected".to_string(),
-                            }],
-                            summary: "Approval rejected".to_string(),
-                        },
-                        artifacts: vec![],
-                        metrics: ToolMetrics::default(),
-                    });
-                }
+            && approval.required
+        {
+            let approved = ctx
+                .runtime
+                .approval
+                .request_tool(
+                    "".to_string(),
+                    &self.manifest.name,
+                    &args,
+                    format!("Run {} tool", self.manifest.name),
+                    format!("Run {} tool", self.manifest.name),
+                )
+                .await?;
+            if !approved {
+                return Ok(ToolOutput {
+                    result: ToolResult {
+                        r#type: "error".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: "Approval rejected".to_string(),
+                        }],
+                        summary: "Approval rejected".to_string(),
+                    },
+                    artifacts: vec![],
+                    metrics: ToolMetrics::default(),
+                });
             }
+        }
 
         match self.manifest.entry.kind.as_str() {
             "python_class" | "rust_type" => {
@@ -195,7 +231,9 @@ impl Tool for ManifestTool {
                     None => anyhow::bail!(
                         "Built-in tool not found for manifest {} (module={}, class={}). \
                         Registered keys: {:?}",
-                        self.manifest.name, module, class,
+                        self.manifest.name,
+                        module,
+                        class,
                         builtin_tool_registry_keys()
                     ),
                 }
@@ -217,14 +255,17 @@ impl Tool for ManifestTool {
 
                 // Apply sandbox constraints
                 if let Some(ref sandbox) = self.manifest.sandbox
-                    && sandbox.network == Some(false) {
-                        // Best-effort: on macOS use sandbox-exec, on Linux use unshare
-                        #[cfg(target_os = "macos")]
-                        {
-                            // sandbox-exec would go here; for now we log a warning
-                            tracing::warn!("Network sandbox requested but not enforced on this platform");
-                        }
+                    && sandbox.network == Some(false)
+                {
+                    // Best-effort: on macOS use sandbox-exec, on Linux use unshare
+                    #[cfg(target_os = "macos")]
+                    {
+                        // sandbox-exec would go here; for now we log a warning
+                        tracing::warn!(
+                            "Network sandbox requested but not enforced on this platform"
+                        );
                     }
+                }
 
                 let mut child = cmd.spawn()?;
                 if let Some(stdin) = child.stdin.take() {
@@ -310,7 +351,11 @@ mod tests {
             runtime: crate::runtime::Runtime::new(
                 crate::config::Config::default(),
                 crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
                 crate::wire::RootWireHub::new(),
                 store,
             ),
@@ -332,7 +377,12 @@ mod tests {
             name: "test".to_string(),
             version: "1.0".to_string(),
             description: "desc".to_string(),
-            entry: ManifestEntry { kind: "subprocess".to_string(), command: None, module: None, class: None },
+            entry: ManifestEntry {
+                kind: "subprocess".to_string(),
+                command: None,
+                module: None,
+                class: None,
+            },
             parameters: None,
             approval: None,
             sandbox: None,
@@ -374,7 +424,12 @@ entry:
             name: "bad".to_string(),
             version: "1.0".to_string(),
             description: "desc".to_string(),
-            entry: ManifestEntry { kind: "wasm".to_string(), command: None, module: None, class: None },
+            entry: ManifestEntry {
+                kind: "wasm".to_string(),
+                command: None,
+                module: None,
+                class: None,
+            },
             parameters: None,
             approval: None,
             sandbox: None,
@@ -385,7 +440,11 @@ entry:
             runtime: crate::runtime::Runtime::new(
                 crate::config::Config::default(),
                 crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
                 crate::wire::RootWireHub::new(),
                 store,
             ),
@@ -419,7 +478,11 @@ entry:
             runtime: crate::runtime::Runtime::new(
                 crate::config::Config::default(),
                 crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
                 crate::wire::RootWireHub::new(),
                 store,
             ),
@@ -454,7 +517,11 @@ entry:
             runtime: crate::runtime::Runtime::new(
                 crate::config::Config::default(),
                 crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
                 crate::wire::RootWireHub::new(),
                 store,
             ),

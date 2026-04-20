@@ -1,8 +1,8 @@
-use async_trait::async_trait;
-use serde_json::Value;
 use crate::mcp::client::{MCPClient, MCPContent};
 use crate::message::{ContentBlock, ToolMetrics};
 use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult};
+use async_trait::async_trait;
+use serde_json::Value;
 use std::sync::Arc;
 
 /// Aligns with Python kimi-cli `MCP_MAX_OUTPUT_CHARS` (§7.x / §3.4 parity).
@@ -26,15 +26,26 @@ pub struct MCPTool {
 
 impl MCPTool {
     pub fn new(name: String, description: String, schema: Value, client: Arc<MCPClient>) -> Self {
-        Self { name, description, schema, client }
+        Self {
+            name,
+            description,
+            schema,
+            client,
+        }
     }
 }
 
 #[async_trait]
 impl Tool for MCPTool {
-    fn name(&self) -> &str { &self.name }
-    fn description(&self) -> &str { &self.description }
-    fn schema(&self) -> Value { self.schema.clone() }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn schema(&self) -> Value {
+        self.schema.clone()
+    }
 
     async fn call(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let result = self.client.call_tool(&self.name, args).await?;
@@ -50,10 +61,7 @@ impl Tool for MCPTool {
                 }
                 MCPContent::Resource { uri, mime, text } => {
                     if let Some(t) = text {
-                        text_parts.push(format!(
-                            "[Resource: {uri}]\n{}",
-                            truncate_mcp_text(t)
-                        ));
+                        text_parts.push(format!("[Resource: {uri}]\n{}", truncate_mcp_text(t)));
                     } else {
                         let mime = mime.as_deref().unwrap_or("?");
                         text_parts.push(format!("[Resource: {uri} mime={mime}]"));
@@ -64,9 +72,17 @@ impl Tool for MCPTool {
         let text = text_parts.join("\n");
         Ok(ToolOutput {
             result: ToolResult {
-                r#type: if result.is_error { "error".to_string() } else { "success".to_string() },
+                r#type: if result.is_error {
+                    "error".to_string()
+                } else {
+                    "success".to_string()
+                },
                 content: vec![ContentBlock::Text { text }],
-                summary: if result.is_error { "MCP tool failed".to_string() } else { "MCP tool completed".to_string() },
+                summary: if result.is_error {
+                    "MCP tool failed".to_string()
+                } else {
+                    "MCP tool completed".to_string()
+                },
             },
             artifacts: vec![],
             metrics: ToolMetrics::default(),

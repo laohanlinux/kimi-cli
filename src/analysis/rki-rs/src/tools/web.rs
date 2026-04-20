@@ -1,14 +1,17 @@
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
-
 
 pub struct SearchWebTool;
 
 #[async_trait]
 impl Tool for SearchWebTool {
-    fn name(&self) -> &str { "search_web" }
-    fn description(&self) -> &str { "Search the web" }
+    fn name(&self) -> &str {
+        "search_web"
+    }
+    fn description(&self) -> &str {
+        "Search the web"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -39,8 +42,12 @@ pub struct FetchURLTool;
 
 #[async_trait]
 impl Tool for FetchURLTool {
-    fn name(&self) -> &str { "fetch_url" }
-    fn description(&self) -> &str { "Fetch a URL" }
+    fn name(&self) -> &str {
+        "fetch_url"
+    }
+    fn description(&self) -> &str {
+        "Fetch a URL"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -61,7 +68,9 @@ impl Tool for FetchURLTool {
         Ok(ToolOutput {
             result: ToolResult {
                 r#type: "success".to_string(),
-                content: vec![ContentBlock::Text { text: text.chars().take(10000).collect() }],
+                content: vec![ContentBlock::Text {
+                    text: text.chars().take(10000).collect(),
+                }],
                 summary: "Fetch complete".to_string(),
             },
             artifacts: vec![],
@@ -83,7 +92,11 @@ mod tests {
             runtime: crate::runtime::Runtime::new(
                 crate::config::Config::default(),
                 crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-                Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+                Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
                 crate::wire::RootWireHub::new(),
                 store,
             ),

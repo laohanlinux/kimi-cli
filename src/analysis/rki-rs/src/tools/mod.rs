@@ -2,32 +2,39 @@
 //!
 //! All tools implement `Tool`: `name`, `description`, `schema`, and async `call`.
 
-use async_trait::async_trait;
-use serde_json::Value;
-use crate::message::{ContentBlock, Artifact, ToolMetrics};
+use crate::message::{Artifact, ContentBlock, ToolMetrics};
 use crate::runtime::Runtime;
 use crate::token::ContextToken;
 use crate::wire::RootWireHub;
+use async_trait::async_trait;
+use serde_json::Value;
 
-pub mod shell;
-pub mod file;
-pub mod web;
-pub mod misc;
 pub mod agent;
-pub mod task;
-pub mod plan;
-pub mod manifest;
+pub mod file;
 pub mod function_toolkit;
+pub mod manifest;
+pub mod misc;
+pub mod plan;
+pub mod shell;
+pub mod task;
+pub mod web;
 
-pub use function_toolkit::{FunctionTool, FunctionToolBuilder};
-pub use shell::ShellTool;
-pub use file::{ReadFileTool, ReadMediaFileTool, WriteFileTool, StrReplaceFileTool, GlobTool, GrepTool};
-pub use web::{SearchWebTool, FetchURLTool};
-pub use misc::{think_tool, ask_user_question_tool, set_todo_list_tool, send_dmail_tool, ThinkTool, SetTodoListTool, AskUserQuestionTool, SendDMailTool};
 pub use agent::AgentTool;
-pub use task::{task_list_tool, task_output_tool, task_stop_tool, TaskListTool, TaskOutputTool, TaskStopTool};
-pub use plan::{enter_plan_mode_tool, exit_plan_mode_tool, EnterPlanModeTool, ExitPlanModeTool};
-pub use manifest::{discover_manifests, ManifestTool};
+pub use file::{
+    GlobTool, GrepTool, ReadFileTool, ReadMediaFileTool, StrReplaceFileTool, WriteFileTool,
+};
+pub use function_toolkit::{FunctionTool, FunctionToolBuilder};
+pub use manifest::{ManifestTool, discover_manifests};
+pub use misc::{
+    AskUserQuestionTool, SendDMailTool, SetTodoListTool, ThinkTool, ask_user_question_tool,
+    send_dmail_tool, set_todo_list_tool, think_tool,
+};
+pub use plan::{EnterPlanModeTool, ExitPlanModeTool, enter_plan_mode_tool, exit_plan_mode_tool};
+pub use shell::ShellTool;
+pub use task::{
+    TaskListTool, TaskOutputTool, TaskStopTool, task_list_tool, task_output_tool, task_stop_tool,
+};
+pub use web::{FetchURLTool, SearchWebTool};
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -69,11 +76,16 @@ mod tests {
         let output = ToolOutput {
             result: ToolResult {
                 r#type: "success".to_string(),
-                content: vec![ContentBlock::Text { text: "ok".to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: "ok".to_string(),
+                }],
                 summary: "done".to_string(),
             },
             artifacts: vec![],
-            metrics: ToolMetrics { elapsed_ms: 42, exit_code: Some(0) },
+            metrics: ToolMetrics {
+                elapsed_ms: 42,
+                exit_code: Some(0),
+            },
         };
         assert_eq!(output.result.r#type, "success");
         assert_eq!(output.metrics.elapsed_ms, 42);
@@ -83,7 +95,9 @@ mod tests {
     fn test_tool_result_error_variant() {
         let result = ToolResult {
             r#type: "error".to_string(),
-            content: vec![ContentBlock::Traceback { text: "panic".to_string() }],
+            content: vec![ContentBlock::Traceback {
+                text: "panic".to_string(),
+            }],
             summary: "failed".to_string(),
         };
         assert!(matches!(result.content[0], ContentBlock::Traceback { .. }));

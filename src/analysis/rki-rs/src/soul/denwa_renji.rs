@@ -48,10 +48,16 @@ mod tests {
     #[tokio::test]
     async fn test_send_overwrites_pending() {
         let d = DenwaRenji::new();
-        d.send(1, vec![Message::User(crate::message::UserMessage::text("first"))])
-            .await;
-        d.send(2, vec![Message::User(crate::message::UserMessage::text("second"))])
-            .await;
+        d.send(
+            1,
+            vec![Message::User(crate::message::UserMessage::text("first"))],
+        )
+        .await;
+        d.send(
+            2,
+            vec![Message::User(crate::message::UserMessage::text("second"))],
+        )
+        .await;
 
         let claimed = d.claim().await.unwrap();
         assert_eq!(claimed.0, 2);
@@ -76,8 +82,11 @@ mod tests {
     async fn test_claim_returns_none_when_empty() {
         let d = DenwaRenji::new();
         assert!(d.claim().await.is_none());
-        d.send(1, vec![Message::User(crate::message::UserMessage::text("x"))])
-            .await;
+        d.send(
+            1,
+            vec![Message::User(crate::message::UserMessage::text("x"))],
+        )
+        .await;
         assert!(d.claim().await.is_some());
         assert!(d.claim().await.is_none());
     }

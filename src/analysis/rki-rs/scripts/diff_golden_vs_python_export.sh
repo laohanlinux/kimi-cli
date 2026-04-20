@@ -5,7 +5,8 @@
 #   bash scripts/diff_golden_vs_python_export.sh [PYTHON_EXPORT.jsonl]
 #
 # If the argument is omitted: use tests/golden/python_export.jsonl when present, otherwise
-# tests/golden/python_export.sample.jsonl (canonical concat of minimal_turn + more_events + session_shutdown).
+# tests/golden/python_export.sample.jsonl (canonical concat of minimal_turn + more_events +
+# extra_variants + session_shutdown).
 #
 # Lines starting with # and blank lines are ignored on the Python side. Each JSON line is
 # canonicalized with jq (-S sort keys, -c compact) so key order differences do not false-fail.
@@ -36,7 +37,7 @@ normalize_ndjson() {
 build_rust_reference() {
   local out="$1"
   : >"$out"
-  for name in minimal_turn.jsonl more_events.jsonl session_shutdown.jsonl; do
+  for name in minimal_turn.jsonl more_events.jsonl extra_variants.jsonl session_shutdown.jsonl; do
     local f="$GOLDEN_DIR/$name"
     if [[ ! -f "$f" ]]; then
       echo "error: missing golden fixture $f" >&2

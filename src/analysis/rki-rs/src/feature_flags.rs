@@ -48,7 +48,9 @@ impl ExperimentalFeature {
             ExperimentalFeature::PullGeneration => "KIMI_EXPERIMENTAL_PULL_GENERATION",
             ExperimentalFeature::StructuredEffects => "KIMI_EXPERIMENTAL_STRUCTURED_EFFECTS",
             ExperimentalFeature::SubagentEventSource => "KIMI_EXPERIMENTAL_SUBAGENT_EVENT_SOURCE",
-            ExperimentalFeature::SubagentWirePersistence => "KIMI_EXPERIMENTAL_SUBAGENT_WIRE_PERSISTENCE",
+            ExperimentalFeature::SubagentWirePersistence => {
+                "KIMI_EXPERIMENTAL_SUBAGENT_WIRE_PERSISTENCE"
+            }
             ExperimentalFeature::PluginRegistry => "KIMI_EXPERIMENTAL_PLUGIN_REGISTRY",
             ExperimentalFeature::FunctionTools => "KIMI_EXPERIMENTAL_FUNCTION_TOOLS",
             ExperimentalFeature::NativeMcp => "KIMI_EXPERIMENTAL_NATIVE_MCP",
@@ -87,7 +89,9 @@ impl FeatureFlags {
             ExperimentalFeature::OrchestratorAbTest,
             ExperimentalFeature::ConfigHotReload,
         ] {
-            if let Ok(val) = std::env::var(feature.env_name()) && is_truthy(&val) {
+            if let Ok(val) = std::env::var(feature.env_name())
+                && is_truthy(&val)
+            {
                 enabled.insert(feature);
             }
         }
@@ -116,7 +120,10 @@ impl FeatureFlags {
 }
 
 fn is_truthy(s: &str) -> bool {
-    matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        s.trim().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 #[cfg(test)]

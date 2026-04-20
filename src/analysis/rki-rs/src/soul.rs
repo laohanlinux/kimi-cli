@@ -66,6 +66,17 @@ impl KimiSoul {
             .recover_stale_claims(STALE_NOTIFICATION_CLAIM_MS)
             .await;
 
+        // Python `KimiSoul`: `ack_ids("llm", extract_notification_ids(context.history))` for restored sessions.
+        {
+            let ids = {
+                let ctx = self.context.lock().await;
+                crate::notification::llm::extract_notification_ids_from_history(&ctx.history())
+            };
+            for id in ids {
+                let _ = self.runtime.notifications.ack("llm", &id).await;
+            }
+        }
+
         // Slash command interception (§1.2 step 15) — before turn validation so `/plan` etc. stay valid.
         let slash_src = turn.text_for_slash();
         if let Some(cmd) = crate::slash::SlashCommand::parse(&slash_src)
@@ -109,7 +120,7 @@ impl KimiSoul {
         // §1.2 L16: reject empty or image-like input for text-only models (after slash dispatch).
         let supports_vision = {
             let cfg = self.runtime.config.read().await;
-            crate::user_input::resolve_supports_vision(&*cfg)
+            crate::user_input::resolve_supports_vision_for_model(&*cfg, &cfg.default_model)
         };
         if let Err(rej) =
             crate::user_input::validate_turn_content_parts(&turn.parts, supports_vision)
@@ -160,15 +171,15 @@ impl KimiSoul {
 mod tests {
     use super::*;
     use crate::agent::{Agent, AgentSpec};
-    use crate::runtime::Runtime;
-    use crate::config::Config;
     use crate::approval::ApprovalRuntime;
-    use crate::wire::RootWireHub;
-    use crate::session::Session;
-    use crate::store::Store;
+    use crate::config::Config;
     use crate::llm::EchoProvider;
     use crate::message::ContentPart;
+    use crate::runtime::Runtime;
+    use crate::session::Session;
+    use crate::store::Store;
     use crate::turn_input::TurnInput;
+    use crate::wire::RootWireHub;
     use std::sync::Arc;
 
     fn test_soul() -> KimiSoul {
@@ -178,10 +189,13 @@ mod tests {
         let runtime = Runtime::new(
             Config::default(),
             Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-            approval, hub, store,
+            approval,
+            hub,
+            store,
         );
         let context = Arc::new(Mutex::new(
-            futures::executor::block_on(Context::load(&runtime.store, &runtime.session.id)).unwrap()
+            futures::executor::block_on(Context::load(&runtime.store, &runtime.session.id))
+                .unwrap(),
         ));
         let agent = Agent {
             spec: AgentSpec {
@@ -198,13 +212,19 @@ mod tests {
 
     #[test]
     fn test_back_to_the_future_display() {
-        let btf = BackToTheFuture { checkpoint_id: 42, messages: vec![] };
+        let btf = BackToTheFuture {
+            checkpoint_id: 42,
+            messages: vec![],
+        };
         assert_eq!(btf.to_string(), "BackToTheFuture(checkpoint_id=42)");
     }
 
     #[test]
     fn test_back_to_the_future_implements_error() {
-        let btf = BackToTheFuture { checkpoint_id: 7, messages: vec![] };
+        let btf = BackToTheFuture {
+            checkpoint_id: 7,
+            messages: vec![],
+        };
         // Verify it can be used as a dyn Error
         let err: &dyn std::error::Error = &btf;
         assert!(err.to_string().contains("7"));
@@ -235,13 +255,14 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify title was auto-set
-        let state = soul.runtime.store.get_state(&soul.runtime.session.id).unwrap();
+        let state = soul
+            .runtime
+            .store
+            .get_state(&soul.runtime.session.id)
+            .unwrap();
         if let Some(s) = state {
             let data: serde_json::Value = serde_json::from_str(&s).unwrap();
-            assert_eq!(
-                data["title"].as_str(),
-                Some("how do I refactor this code?")
-            );
+            assert_eq!(data["title"].as_str(), Some("how do I refactor this code?"));
         }
     }
 
@@ -261,7 +282,8 @@ mod tests {
             c.supports_vision = false;
         }
         let hub = RootWireHub::new();
-        let r = soul.run("see ![cap](http://example.com/a.png)", &hub)
+        let r = soul
+            .run("see ![cap](http://example.com/a.png)", &hub)
             .await
             .unwrap();
         assert_eq!(r.stop_reason, "validation:vision_not_supported");
@@ -272,7 +294,10 @@ mod tests {
     async fn test_soul_echo_model_rejects_markdown_image_by_default() {
         let soul = test_soul();
         let hub = RootWireHub::new();
-        let r = soul.run("![](https://example.com/x.png)", &hub).await.unwrap();
+        let r = soul
+            .run("![](https://example.com/x.png)", &hub)
+            .await
+            .unwrap();
         assert_eq!(r.stop_reason, "validation:vision_not_supported");
     }
 

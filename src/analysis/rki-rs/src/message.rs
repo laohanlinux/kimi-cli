@@ -29,7 +29,9 @@ pub struct ToolEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
-    System { content: String },
+    System {
+        content: String,
+    },
     User(UserMessage),
     Assistant {
         content: Option<String>,
@@ -37,19 +39,31 @@ pub enum Message {
         tool_calls: Option<Vec<ToolCall>>,
     },
     /// Legacy tool message for LLM-boundary consumption.
-    Tool { tool_call_id: String, content: Vec<ContentBlock> },
+    Tool {
+        tool_call_id: String,
+        content: Vec<ContentBlock>,
+    },
     /// Native tool event with rich metadata (§6.4).
     #[serde(rename = "tool_event")]
     ToolEvent(ToolEvent),
     #[serde(rename = "_system_prompt")]
-    SystemPrompt { content: String },
+    SystemPrompt {
+        content: String,
+    },
     #[serde(rename = "_checkpoint")]
-    Checkpoint { id: u64 },
+    Checkpoint {
+        id: u64,
+    },
     #[serde(rename = "_usage")]
-    Usage { token_count: usize },
+    Usage {
+        token_count: usize,
+    },
     /// Compaction boundary marker.
     #[serde(rename = "_compaction")]
-    Compaction { summary: String, preserved_turns: usize },
+    Compaction {
+        summary: String,
+        preserved_turns: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,12 +224,28 @@ impl<'de> Deserialize<'de> for UserMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Code { language: Option<String>, code: String },
-    Image { data: String, mime: String },
-    Diff { before: String, after: String },
-    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
-    Traceback { text: String },
+    Text {
+        text: String,
+    },
+    Code {
+        language: Option<String>,
+        code: String,
+    },
+    Image {
+        data: String,
+        mime: String,
+    },
+    Diff {
+        before: String,
+        after: String,
+    },
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    Traceback {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,7 +291,13 @@ pub fn content_to_string(blocks: &[ContentBlock]) -> String {
             ContentBlock::Table { headers, rows } => {
                 let mut lines = Vec::new();
                 lines.push(headers.join(" | "));
-                lines.push(headers.iter().map(|_| "---".to_string()).collect::<Vec<_>>().join(" | "));
+                lines.push(
+                    headers
+                        .iter()
+                        .map(|_| "---".to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                );
                 for row in rows {
                     lines.push(row.join(" | "));
                 }
@@ -299,12 +335,28 @@ mod tests {
     #[test]
     fn test_content_to_string_all_variants() {
         let blocks = vec![
-            ContentBlock::Text { text: "hello".to_string() },
-            ContentBlock::Code { language: Some("rust".to_string()), code: "let x = 1;".to_string() },
-            ContentBlock::Image { data: "base64data".to_string(), mime: "image/png".to_string() },
-            ContentBlock::Diff { before: "old".to_string(), after: "new".to_string() },
-            ContentBlock::Table { headers: vec!["a".to_string(), "b".to_string()], rows: vec![vec!["1".to_string(), "2".to_string()]] },
-            ContentBlock::Traceback { text: "Error at line 1".to_string() },
+            ContentBlock::Text {
+                text: "hello".to_string(),
+            },
+            ContentBlock::Code {
+                language: Some("rust".to_string()),
+                code: "let x = 1;".to_string(),
+            },
+            ContentBlock::Image {
+                data: "base64data".to_string(),
+                mime: "image/png".to_string(),
+            },
+            ContentBlock::Diff {
+                before: "old".to_string(),
+                after: "new".to_string(),
+            },
+            ContentBlock::Table {
+                headers: vec!["a".to_string(), "b".to_string()],
+                rows: vec![vec!["1".to_string(), "2".to_string()]],
+            },
+            ContentBlock::Traceback {
+                text: "Error at line 1".to_string(),
+            },
         ];
         let s = content_to_string(&blocks);
         assert!(s.contains("hello"));
@@ -321,13 +373,21 @@ mod tests {
             tool_call_id: "tc-1".to_string(),
             tool_name: "shell".to_string(),
             status: ToolStatus::Completed,
-            content: vec![ContentBlock::Text { text: "output".to_string() }],
-            metrics: Some(ToolMetrics { elapsed_ms: 100, exit_code: Some(0) }),
+            content: vec![ContentBlock::Text {
+                text: "output".to_string(),
+            }],
+            metrics: Some(ToolMetrics {
+                elapsed_ms: 100,
+                exit_code: Some(0),
+            }),
             elapsed_ms: Some(100),
         };
         let msg = ev.to_tool_message();
         match msg {
-            Message::Tool { tool_call_id, content } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => {
                 assert_eq!(tool_call_id, "tc-1");
                 assert_eq!(content.len(), 1);
             }
@@ -338,28 +398,50 @@ mod tests {
     #[test]
     fn test_message_serde_roundtrip() {
         let msgs = vec![
-            Message::System { content: "sys".to_string() },
+            Message::System {
+                content: "sys".to_string(),
+            },
             Message::User(UserMessage::text("hi")),
-            Message::Assistant { content: Some("ok".to_string()), tool_calls: None },
-            Message::Tool { tool_call_id: "tc".to_string(), content: vec![ContentBlock::Text { text: "t".to_string() }] },
+            Message::Assistant {
+                content: Some("ok".to_string()),
+                tool_calls: None,
+            },
+            Message::Tool {
+                tool_call_id: "tc".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "t".to_string(),
+                }],
+            },
             Message::ToolEvent(ToolEvent {
                 tool_call_id: "tc2".to_string(),
                 tool_name: "read_file".to_string(),
                 status: ToolStatus::Failed,
-                content: vec![ContentBlock::Text { text: "err".to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: "err".to_string(),
+                }],
                 metrics: None,
                 elapsed_ms: None,
             }),
-            Message::SystemPrompt { content: "prompt".to_string() },
+            Message::SystemPrompt {
+                content: "prompt".to_string(),
+            },
             Message::Checkpoint { id: 5 },
             Message::Usage { token_count: 42 },
-            Message::Compaction { summary: "compacted".to_string(), preserved_turns: 3 },
+            Message::Compaction {
+                summary: "compacted".to_string(),
+                preserved_turns: 3,
+            },
         ];
         for msg in msgs {
             let json = serde_json::to_string(&msg).unwrap();
             let back: Message = serde_json::from_str(&json).unwrap();
             // Compare debug strings since Message doesn't impl PartialEq
-            assert_eq!(format!("{:?}", msg), format!("{:?}", back), "Roundtrip failed for {:?}", msg);
+            assert_eq!(
+                format!("{:?}", msg),
+                format!("{:?}", back),
+                "Roundtrip failed for {:?}",
+                msg
+            );
         }
     }
 
@@ -370,7 +452,10 @@ mod tests {
             tool_name: "shell".to_string(),
             status: ToolStatus::Started,
             content: vec![],
-            metrics: Some(ToolMetrics { elapsed_ms: 50, exit_code: None }),
+            metrics: Some(ToolMetrics {
+                elapsed_ms: 50,
+                exit_code: None,
+            }),
             elapsed_ms: Some(50),
         };
         let json = serde_json::to_value(&ev).unwrap();
@@ -383,9 +468,15 @@ mod tests {
     #[test]
     fn test_content_part_serde_roundtrip() {
         let parts = vec![
-            ContentPart::Text { text: "hello".to_string() },
-            ContentPart::Think { text: "ponder".to_string() },
-            ContentPart::ImageUrl { url: "http://x/a.png".to_string() },
+            ContentPart::Text {
+                text: "hello".to_string(),
+            },
+            ContentPart::Think {
+                text: "ponder".to_string(),
+            },
+            ContentPart::ImageUrl {
+                url: "http://x/a.png".to_string(),
+            },
         ];
         for part in parts {
             let json = serde_json::to_string(&part).unwrap();

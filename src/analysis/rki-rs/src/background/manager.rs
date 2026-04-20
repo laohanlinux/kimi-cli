@@ -1,12 +1,12 @@
 use crate::background::executor::{AgentExecutor, TaskExecutor};
-use crate::background::types::{TaskKind, TaskRef, TaskSpec, TaskStatus, TaskEvent};
+use crate::background::types::{TaskEvent, TaskKind, TaskRef, TaskSpec, TaskStatus};
 use crate::feature_flags::ExperimentalFeature;
 use crate::runtime::Runtime;
 use crate::store::Store;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::Command;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 struct Inner {
     tasks: Mutex<HashMap<String, TaskRef>>,
@@ -57,6 +57,26 @@ impl Inner {
         let mut g = self.running_agent.lock().await;
         *g = g.saturating_sub(1);
     }
+}
+
+async fn publish_terminal_bg_notification_inner(
+    inner: &Arc<Inner>,
+    task_id: &str,
+    terminal_reason: &str,
+) {
+    let task = { inner.tasks.lock().await.get(task_id).cloned() };
+    let Some(task) = task else {
+        return;
+    };
+    let rt = inner.runtime.lock().unwrap().clone();
+    let Some(runtime) = rt else {
+        return;
+    };
+    let ev = crate::notification::task_terminal::build_background_task_notification(
+        &task,
+        terminal_reason,
+    );
+    let _ = runtime.notifications.publish(ev).await;
 }
 
 #[derive(Clone)]
@@ -122,14 +142,18 @@ impl BackgroundTaskManager {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
                 loop {
                     interval.tick().await;
-                    let mgr = BackgroundTaskManager { inner: inner_clone.clone() };
+                    let mgr = BackgroundTaskManager {
+                        inner: inner_clone.clone(),
+                    };
                     let _ = mgr.start_pending().await;
                 }
             });
             let inner_retry = inner.clone();
             tokio::spawn(async move {
                 while let Some(spec) = retry_rx.recv().await {
-                    let mgr = BackgroundTaskManager { inner: inner_retry.clone() };
+                    let mgr = BackgroundTaskManager {
+                        inner: inner_retry.clone(),
+                    };
                     let _ = mgr.submit(spec).await;
                 }
             });
@@ -158,28 +182,73 @@ impl BackgroundTaskManager {
 
     pub async fn recover(&self) -> anyhow::Result<()> {
         let rows = self.inner.store.list_tasks(&self.inner.session_id)?;
-        let mut tasks = self.inner.tasks.lock().await;
-        for (id, _kind, spec, status, _output) in rows {
-            let spec: TaskSpec = serde_json::from_str(&spec).unwrap_or(TaskSpec {
-                id: id.clone(),
-                kind: TaskKind::Bash { command: String::new() },
-                created_at: chrono::Utc::now(),
-                dependencies: vec![],
-                max_retries: 0,
-            });
-            let status = match status.as_str() {
-                "pending" => TaskStatus::Pending,
-                "running" => TaskStatus::Running,
-                "completed" => TaskStatus::Completed { exit_code: None },
-                "failed" => TaskStatus::Failed {
-                    reason: "Recovered failed task".to_string(),
-                },
-                "cancelled" => TaskStatus::Cancelled,
-                _ => TaskStatus::Lost,
-            };
-            tasks.insert(id.clone(), TaskRef { id, spec, status });
+        {
+            let mut tasks = self.inner.tasks.lock().await;
+            for (id, _kind, spec, status, _output) in rows {
+                let spec: TaskSpec = serde_json::from_str(&spec).unwrap_or(TaskSpec {
+                    id: id.clone(),
+                    kind: TaskKind::Bash {
+                        command: String::new(),
+                    },
+                    created_at: chrono::Utc::now(),
+                    dependencies: vec![],
+                    max_retries: 0,
+                    timeout_s: None,
+                });
+                let status = match status.as_str() {
+                    "pending" => TaskStatus::Pending,
+                    "running" => TaskStatus::Running,
+                    "completed" => TaskStatus::Completed { exit_code: None },
+                    "failed" => TaskStatus::Failed {
+                        reason: "Recovered failed task".to_string(),
+                    },
+                    "cancelled" => TaskStatus::Cancelled,
+                    _ => TaskStatus::Lost,
+                };
+                tasks.insert(
+                    id.clone(),
+                    TaskRef {
+                        id,
+                        spec,
+                        status,
+                        timed_out: false,
+                    },
+                );
+            }
         }
+        self.publish_stored_terminal_notifications(None).await;
         Ok(())
+    }
+
+    /// Parity with Python `BackgroundManager.publish_terminal_notifications`: persist terminal task
+    /// notifications after restart. Dedupe keys prevent duplicates when the event was already stored.
+    pub async fn publish_stored_terminal_notifications(&self, limit: Option<usize>) {
+        use crate::notification::task_terminal::{
+            build_background_task_notification, terminal_reason_for_task,
+        };
+        let tasks = self.list().await;
+        let mut new_count = 0usize;
+        for task in tasks {
+            let Some(reason) = terminal_reason_for_task(&task) else {
+                continue;
+            };
+            let rt = self.inner.runtime.lock().unwrap().clone();
+            let Some(runtime) = rt else {
+                continue;
+            };
+            let ev = build_background_task_notification(&task, reason);
+            match runtime.notifications.publish(ev).await {
+                Ok(Some(_)) => {
+                    new_count += 1;
+                    if let Some(lim) = limit {
+                        if new_count >= lim {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// §8.3: submit and return a live `TaskEvent` receiver before scheduling (avoids missing fast tasks).
@@ -193,6 +262,7 @@ impl BackgroundTaskManager {
             id: id.clone(),
             spec: spec.clone(),
             status: TaskStatus::Pending,
+            timed_out: false,
         };
         self.inner.tasks.lock().await.insert(id.clone(), task_ref);
         self.inner
@@ -201,13 +271,11 @@ impl BackgroundTaskManager {
             .await
             .insert(id.clone(), ev_tx);
         let spec_json = serde_json::to_string(&spec)?;
-        if let Err(e) = self.inner.store.create_task(
-            &id,
-            &self.inner.session_id,
-            "task",
-            &spec_json,
-            "pending",
-        ) {
+        if let Err(e) =
+            self.inner
+                .store
+                .create_task(&id, &self.inner.session_id, "task", &spec_json, "pending")
+        {
             self.inner.tasks.lock().await.remove(&id);
             self.inner.task_event_txs.lock().await.remove(&id);
             return Err(e.into());
@@ -221,7 +289,10 @@ impl BackgroundTaskManager {
     }
 
     /// §8.3: subscribe to live task events (`Started`, `Output`, terminal state). Returns `None` if `task_id` is unknown.
-    pub async fn subscribe_task_results(&self, task_id: &str) -> Option<broadcast::Receiver<TaskEvent>> {
+    pub async fn subscribe_task_results(
+        &self,
+        task_id: &str,
+    ) -> Option<broadcast::Receiver<TaskEvent>> {
         self.inner
             .task_event_txs
             .lock()
@@ -231,7 +302,12 @@ impl BackgroundTaskManager {
     }
 
     pub async fn status(&self, id: &str) -> Option<TaskStatus> {
-        self.inner.tasks.lock().await.get(id).map(|t| t.status.clone())
+        self.inner
+            .tasks
+            .lock()
+            .await
+            .get(id)
+            .map(|t| t.status.clone())
     }
 
     pub async fn list(&self) -> Vec<TaskRef> {
@@ -248,14 +324,20 @@ impl BackgroundTaskManager {
         if let Some(handle) = self.inner.aborts.lock().await.remove(id) {
             handle.abort();
         }
-        self.inner
-            .store
-            .update_task_status(id, "cancelled", None)?;
+        self.inner.store.update_task_status(id, "cancelled", None)?;
         self.inner.emit_task_event(id, TaskEvent::Cancelled).await;
         self.inner.finish_task_event_channel(id).await;
-        let mut tasks = self.inner.tasks.lock().await;
-        if let Some(t) = tasks.get_mut(id) {
-            t.status = TaskStatus::Cancelled;
+        let had_in_memory = {
+            let mut tasks = self.inner.tasks.lock().await;
+            if let Some(t) = tasks.get_mut(id) {
+                t.status = TaskStatus::Cancelled;
+                true
+            } else {
+                false
+            }
+        };
+        if had_in_memory {
+            publish_terminal_bg_notification_inner(&self.inner, id, "killed").await;
         }
         Ok(())
     }
@@ -386,6 +468,8 @@ impl BackgroundTaskManager {
                                     )
                                     .await;
                                 inner.finish_task_event_channel(&id_spawn).await;
+                                publish_terminal_bg_notification_inner(&inner, &id_spawn, "failed")
+                                    .await;
                                 inner.dec_running_for_bash().await;
                                 return;
                             }
@@ -399,104 +483,193 @@ impl BackgroundTaskManager {
                         let hb_id = id_spawn.clone();
                         let hb_inner = inner.clone();
                         let hb_handle = tokio::spawn(async move {
-                            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                            let mut interval =
+                                tokio::time::interval(std::time::Duration::from_secs(5));
                             loop {
                                 interval.tick().await;
                                 let _ = hb_inner.store.heartbeat_task(&hb_id);
                             }
                         });
 
-                        let result = child.wait_with_output().await;
+                        let timeout_secs = {
+                            let tasks = inner.tasks.lock().await;
+                            tasks.get(&id_spawn).and_then(|t| t.spec.timeout_s)
+                        };
+
+                        let kill_pid = child.id();
+                        let (result, hit_timeout) = if let Some(secs) = timeout_secs {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(secs),
+                                child.wait_with_output(),
+                            )
+                            .await
+                            {
+                                Ok(r) => (r, false),
+                                Err(_) => {
+                                    #[cfg(unix)]
+                                    if let Some(pid) = kill_pid {
+                                        unsafe {
+                                            libc::kill(pid as i32, libc::SIGTERM);
+                                        }
+                                    }
+                                    (
+                                        Err(std::io::Error::new(
+                                            std::io::ErrorKind::TimedOut,
+                                            "timed out",
+                                        )),
+                                        true,
+                                    )
+                                }
+                            }
+                        } else {
+                            (child.wait_with_output().await, false)
+                        };
+
                         hb_handle.abort();
                         let _ = inner.pids.lock().await.remove(&id_spawn);
 
-                        match result {
-                            Ok(output) => {
-                                let text = format!(
-                                    "{}{}",
-                                    String::from_utf8_lossy(&output.stdout),
-                                    String::from_utf8_lossy(&output.stderr)
-                                );
-                                let success = output.status.success();
-                                let status_str = if success {
-                                    "completed"
-                                } else {
-                                    "failed"
-                                };
-                                let retry_next = if !success && distributed_retry {
-                                    let tasks = inner.tasks.lock().await;
-                                    tasks.get(&id_spawn).and_then(|t| {
-                                        if t.spec.max_retries > 0 {
-                                            let mut ns = t.spec.clone();
-                                            ns.id = uuid::Uuid::new_v4().to_string();
-                                            ns.max_retries = t.spec.max_retries - 1;
-                                            Some(ns)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                } else {
-                                    None
-                                };
-
-                                let _ = inner
+                        if hit_timeout {
+                            let secs = timeout_secs.unwrap_or(0);
+                            let reason = format!("Command timed out after {secs}s");
+                            let text = result
+                                .as_ref()
+                                .ok()
+                                .map(|o| {
+                                    format!(
+                                        "{}{}",
+                                        String::from_utf8_lossy(&o.stdout),
+                                        String::from_utf8_lossy(&o.stderr)
+                                    )
+                                })
+                                .unwrap_or_default();
+                            let _ =
+                                inner
                                     .store
-                                    .update_task_status(&id_spawn, status_str, Some(&text));
-                                {
-                                    let mut tasks = inner.tasks.lock().await;
-                                    if let Some(t) = tasks.get_mut(&id_spawn) {
-                                        t.status = TaskStatus::Completed {
-                                            exit_code: output.status.code(),
-                                        };
-                                    }
-                                }
-
-                                inner
-                                    .emit_task_event(
-                                        &id_spawn,
-                                        TaskEvent::Output { text: text.clone() },
-                                    )
-                                    .await;
-                                inner
-                                    .emit_task_event(
-                                        &id_spawn,
-                                        TaskEvent::Completed {
-                                            exit_code: output.status.code(),
-                                        },
-                                    )
-                                    .await;
-                                inner.finish_task_event_channel(&id_spawn).await;
-
-                                if let Some(ns) = retry_next {
-                                    let _ = inner.retry_tx.send(ns);
-                                }
-                            }
-                            Err(e) => {
-                                let _ = inner.store.update_task_status(
-                                    &id_spawn,
-                                    "failed",
-                                    Some(&e.to_string()),
-                                );
+                                    .update_task_status(&id_spawn, "failed", Some(&text));
+                            {
                                 let mut tasks = inner.tasks.lock().await;
                                 if let Some(t) = tasks.get_mut(&id_spawn) {
                                     t.status = TaskStatus::Failed {
-                                        reason: e.to_string(),
+                                        reason: reason.clone(),
                                     };
+                                    t.timed_out = true;
                                 }
-                                inner
-                                    .emit_task_event(
+                            }
+                            inner
+                                .emit_task_event(
+                                    &id_spawn,
+                                    TaskEvent::Output { text: text.clone() },
+                                )
+                                .await;
+                            inner
+                                .emit_task_event(
+                                    &id_spawn,
+                                    TaskEvent::Failed {
+                                        reason: reason.clone(),
+                                    },
+                                )
+                                .await;
+                            inner.finish_task_event_channel(&id_spawn).await;
+                            publish_terminal_bg_notification_inner(&inner, &id_spawn, "timed_out")
+                                .await;
+                        } else {
+                            match result {
+                                Ok(output) => {
+                                    let text = format!(
+                                        "{}{}",
+                                        String::from_utf8_lossy(&output.stdout),
+                                        String::from_utf8_lossy(&output.stderr)
+                                    );
+                                    let success = output.status.success();
+                                    let status_str = if success { "completed" } else { "failed" };
+                                    let retry_next = if !success && distributed_retry {
+                                        let tasks = inner.tasks.lock().await;
+                                        tasks.get(&id_spawn).and_then(|t| {
+                                            if t.spec.max_retries > 0 {
+                                                let mut ns = t.spec.clone();
+                                                ns.id = uuid::Uuid::new_v4().to_string();
+                                                ns.max_retries = t.spec.max_retries - 1;
+                                                Some(ns)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    } else {
+                                        None
+                                    };
+
+                                    let _ = inner.store.update_task_status(
                                         &id_spawn,
-                                        TaskEvent::Failed {
+                                        status_str,
+                                        Some(&text),
+                                    );
+                                    {
+                                        let mut tasks = inner.tasks.lock().await;
+                                        if let Some(t) = tasks.get_mut(&id_spawn) {
+                                            t.status = TaskStatus::Completed {
+                                                exit_code: output.status.code(),
+                                            };
+                                        }
+                                    }
+
+                                    inner
+                                        .emit_task_event(
+                                            &id_spawn,
+                                            TaskEvent::Output { text: text.clone() },
+                                        )
+                                        .await;
+                                    inner
+                                        .emit_task_event(
+                                            &id_spawn,
+                                            TaskEvent::Completed {
+                                                exit_code: output.status.code(),
+                                            },
+                                        )
+                                        .await;
+                                    inner.finish_task_event_channel(&id_spawn).await;
+                                    let term = if success { "completed" } else { "failed" };
+                                    publish_terminal_bg_notification_inner(&inner, &id_spawn, term)
+                                        .await;
+
+                                    if let Some(ns) = retry_next {
+                                        let _ = inner.retry_tx.send(ns);
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = inner.store.update_task_status(
+                                        &id_spawn,
+                                        "failed",
+                                        Some(&e.to_string()),
+                                    );
+                                    let mut tasks = inner.tasks.lock().await;
+                                    if let Some(t) = tasks.get_mut(&id_spawn) {
+                                        t.status = TaskStatus::Failed {
                                             reason: e.to_string(),
-                                        },
+                                        };
+                                    }
+                                    inner
+                                        .emit_task_event(
+                                            &id_spawn,
+                                            TaskEvent::Failed {
+                                                reason: e.to_string(),
+                                            },
+                                        )
+                                        .await;
+                                    inner.finish_task_event_channel(&id_spawn).await;
+                                    publish_terminal_bg_notification_inner(
+                                        &inner, &id_spawn, "failed",
                                     )
                                     .await;
-                                inner.finish_task_event_channel(&id_spawn).await;
+                                }
                             }
                         }
                         inner.dec_running_for_bash().await;
                     });
-                    self.inner.aborts.lock().await.insert(id, handle.abort_handle());
+                    self.inner
+                        .aborts
+                        .lock()
+                        .await
+                        .insert(id, handle.abort_handle());
                 }
                 TaskKind::Agent { .. } => {
                     let id_spawn = id.clone();
@@ -526,6 +699,12 @@ impl BackgroundTaskManager {
                                     )
                                     .await;
                                 inner_clone.finish_task_event_channel(&id_spawn).await;
+                                publish_terminal_bg_notification_inner(
+                                    &inner_clone,
+                                    &id_spawn,
+                                    "failed",
+                                )
+                                .await;
                                 inner_clone.dec_running_for_agent().await;
                                 return;
                             }
@@ -536,7 +715,25 @@ impl BackgroundTaskManager {
                             tasks.get(&id_spawn).map(|t| t.spec.clone())
                         };
                         if let Some(spec) = spec_clone {
-                            let events = executor.execute(&spec).await;
+                            let timeout_s = spec.timeout_s;
+                            let (events, timed_out_agent) = if let Some(secs) = timeout_s {
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(secs),
+                                    executor.execute(&spec),
+                                )
+                                .await
+                                {
+                                    Ok(evs) => (evs, false),
+                                    Err(_) => (
+                                        vec![TaskEvent::Failed {
+                                            reason: format!("Agent task timed out after {secs}s"),
+                                        }],
+                                        true,
+                                    ),
+                                }
+                            } else {
+                                (executor.execute(&spec).await, false)
+                            };
                             let mut output_parts = Vec::new();
                             let mut final_status = TaskStatus::Completed { exit_code: Some(0) };
                             for ev in &events {
@@ -550,7 +747,9 @@ impl BackgroundTaskManager {
                                             reason: reason.clone(),
                                         };
                                     }
-                                    crate::background::types::TaskEvent::Completed { exit_code } => {
+                                    crate::background::types::TaskEvent::Completed {
+                                        exit_code,
+                                    } => {
                                         final_status = TaskStatus::Completed {
                                             exit_code: *exit_code,
                                         };
@@ -564,16 +763,38 @@ impl BackgroundTaskManager {
                                 TaskStatus::Failed { .. } => "failed",
                                 _ => "completed",
                             };
-                            let _ = inner_clone.store.update_task_status(&id_spawn, status_str, Some(&output_text));
+                            let _ = inner_clone.store.update_task_status(
+                                &id_spawn,
+                                status_str,
+                                Some(&output_text),
+                            );
                             let mut tasks = inner_clone.tasks.lock().await;
                             if let Some(t) = tasks.get_mut(&id_spawn) {
-                                t.status = final_status;
+                                t.status = final_status.clone();
+                                if timed_out_agent {
+                                    t.timed_out = true;
+                                }
                             }
+                            drop(tasks);
+                            let reason = if timed_out_agent {
+                                "timed_out"
+                            } else {
+                                match &final_status {
+                                    TaskStatus::Failed { .. } => "failed",
+                                    _ => "completed",
+                                }
+                            };
+                            publish_terminal_bg_notification_inner(&inner_clone, &id_spawn, reason)
+                                .await;
                             inner_clone.finish_task_event_channel(&id_spawn).await;
                         }
                         inner_clone.dec_running_for_agent().await;
                     });
-                    self.inner.aborts.lock().await.insert(id, handle.abort_handle());
+                    self.inner
+                        .aborts
+                        .lock()
+                        .await
+                        .insert(id, handle.abort_handle());
                 }
             }
         }
@@ -602,7 +823,6 @@ pub fn task_events_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::broadcast::error::RecvError;
     use crate::approval::ApprovalRuntime;
     use crate::config::Config;
     use crate::feature_flags::{ExperimentalFeature, FeatureFlags};
@@ -611,6 +831,7 @@ mod tests {
     use crate::store::Store;
     use crate::wire::RootWireHub;
     use std::sync::Arc;
+    use tokio::sync::broadcast::error::RecvError;
 
     fn test_store() -> Store {
         Store::open(std::path::Path::new(":memory:")).unwrap()
@@ -625,10 +846,13 @@ mod tests {
         let mgr1 = BackgroundTaskManager::new(session_id.clone(), store.clone());
         let spec = TaskSpec {
             id: "task-1".to_string(),
-            kind: TaskKind::Bash { command: "echo hello".to_string() },
+            kind: TaskKind::Bash {
+                command: "echo hello".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr1.submit(spec).await.unwrap();
 
@@ -651,10 +875,13 @@ mod tests {
         for i in 0..3 {
             let spec = TaskSpec {
                 id: format!("task-{}", i),
-                kind: TaskKind::Bash { command: format!("echo {}", i) },
+                kind: TaskKind::Bash {
+                    command: format!("echo {}", i),
+                },
                 created_at: chrono::Utc::now(),
                 dependencies: vec![],
                 max_retries: 0,
+                timeout_s: None,
             };
             mgr1.submit(spec).await.unwrap();
         }
@@ -679,10 +906,13 @@ mod tests {
         let mgr_a = BackgroundTaskManager::new(session_a.clone(), store.clone());
         let spec = TaskSpec {
             id: "task-a".to_string(),
-            kind: TaskKind::Bash { command: "echo a".to_string() },
+            kind: TaskKind::Bash {
+                command: "echo a".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr_a.submit(spec).await.unwrap();
 
@@ -709,6 +939,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr1.submit(spec).await.unwrap();
 
@@ -729,10 +960,13 @@ mod tests {
         let mgr = BackgroundTaskManager::new(session_id.clone(), store.clone());
         let spec = TaskSpec {
             id: "hb-task-1".to_string(),
-            kind: TaskKind::Bash { command: "sleep 0.1".to_string() },
+            kind: TaskKind::Bash {
+                command: "sleep 0.1".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr.submit(spec).await.unwrap();
 
@@ -741,7 +975,9 @@ mod tests {
 
         // Check that heartbeat_at was set by querying raw SQLite
         let conn = store.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT heartbeat_at FROM tasks WHERE id = ?1").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT heartbeat_at FROM tasks WHERE id = ?1")
+            .unwrap();
         let mut rows = stmt.query(rusqlite::params!["hb-task-1"]).unwrap();
         if let Some(row) = rows.next().unwrap() {
             let hb: Option<String> = row.get(0).unwrap();
@@ -761,25 +997,34 @@ mod tests {
         // Submit a dependent task before its dependency
         let dependent = TaskSpec {
             id: "dependent-task".to_string(),
-            kind: TaskKind::Bash { command: "echo dependent".to_string() },
+            kind: TaskKind::Bash {
+                command: "echo dependent".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec!["parent-task".to_string()],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr.submit(dependent).await.unwrap();
 
         // Dependent should stay pending because parent is not done
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let status = mgr.status("dependent-task").await.unwrap();
-        assert!(matches!(status, TaskStatus::Pending), "Dependent task should be pending");
+        assert!(
+            matches!(status, TaskStatus::Pending),
+            "Dependent task should be pending"
+        );
 
         // Submit parent task
         let parent = TaskSpec {
             id: "parent-task".to_string(),
-            kind: TaskKind::Bash { command: "echo parent".to_string() },
+            kind: TaskKind::Bash {
+                command: "echo parent".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr.submit(parent).await.unwrap();
 
@@ -801,7 +1046,8 @@ mod tests {
         // When parent was submitted, start_pending ran again and should have started dependent.
         assert!(
             matches!(dep_status, TaskStatus::Completed { .. }),
-            "Dependent should run after parent completes, got {:?}", dep_status
+            "Dependent should run after parent completes, got {:?}",
+            dep_status
         );
     }
 
@@ -814,16 +1060,22 @@ mod tests {
 
         let orphan = TaskSpec {
             id: "orphan-task".to_string(),
-            kind: TaskKind::Bash { command: "echo orphan".to_string() },
+            kind: TaskKind::Bash {
+                command: "echo orphan".to_string(),
+            },
             created_at: chrono::Utc::now(),
             dependencies: vec!["nonexistent".to_string()],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr.submit(orphan).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let status = mgr.status("orphan-task").await.unwrap();
-        assert!(matches!(status, TaskStatus::Pending), "Orphan task should stay pending");
+        assert!(
+            matches!(status, TaskStatus::Pending),
+            "Orphan task should stay pending"
+        );
     }
 
     #[tokio::test]
@@ -852,6 +1104,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 1,
+            timeout_s: None,
         };
         mgr.submit(spec).await.unwrap();
 
@@ -886,6 +1139,37 @@ mod tests {
         assert!(mgr.status("no-such-task").await.is_none());
     }
 
+    #[tokio::test]
+    async fn test_bash_wall_clock_timeout_sets_timed_out() {
+        let store = test_store();
+        let sid = "session-bash-timeout".to_string();
+        let mgr = BackgroundTaskManager::new(sid, store);
+        let spec = TaskSpec {
+            id: "slow-bash".to_string(),
+            kind: TaskKind::Bash {
+                command: "sleep 30".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+            dependencies: vec![],
+            max_retries: 0,
+            timeout_s: Some(1),
+        };
+        mgr.submit(spec).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
+        loop {
+            if let Some(t) = mgr.list().await.into_iter().find(|t| t.id == "slow-bash") {
+                if t.timed_out && matches!(t.status, TaskStatus::Failed { .. }) {
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for bash wall-clock timeout"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+    }
+
     async fn recv_task_ev(rx: &mut broadcast::Receiver<TaskEvent>) -> TaskEvent {
         loop {
             match rx.recv().await {
@@ -913,6 +1197,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         let s2 = TaskSpec {
             id: "fast-bash".to_string(),
@@ -922,6 +1207,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         mgr.submit(s1).await.unwrap();
         mgr.submit(s2).await.unwrap();
@@ -954,6 +1240,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         let (_id, rx) = mgr.submit_with_receiver(spec).await.unwrap();
         let collected: Vec<_> = super::task_events_stream(rx).collect().await;
@@ -962,7 +1249,11 @@ mod tests {
             e,
             TaskEvent::Output { text } if text.contains("evstream")
         )));
-        assert!(collected.iter().any(|e| matches!(e, TaskEvent::Completed { .. })));
+        assert!(
+            collected
+                .iter()
+                .any(|e| matches!(e, TaskEvent::Completed { .. }))
+        );
     }
 
     #[tokio::test]
@@ -979,6 +1270,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             dependencies: vec![],
             max_retries: 0,
+            timeout_s: None,
         };
         let (_id, mut rx) = mgr.submit_with_receiver(spec).await.unwrap();
         assert!(matches!(recv_task_ev(&mut rx).await, TaskEvent::Started));
@@ -988,6 +1280,9 @@ mod tests {
             "got {:?}",
             out
         );
-        assert!(matches!(recv_task_ev(&mut rx).await, TaskEvent::Completed { .. }));
+        assert!(matches!(
+            recv_task_ev(&mut rx).await,
+            TaskEvent::Completed { .. }
+        ));
     }
 }

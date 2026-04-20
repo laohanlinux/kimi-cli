@@ -5,7 +5,7 @@
 
 use crate::wire::{Question, RootWireHub, WireEvent};
 use std::collections::HashMap;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 pub struct QuestionManager {
     waiters: Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
@@ -54,7 +54,10 @@ mod tests {
 
         let qm2 = qm.clone();
         let handle = tokio::spawn(async move {
-            let questions = vec![Question { question: "What is your name?".to_string(), options: vec![] }];
+            let questions = vec![Question {
+                question: "What is your name?".to_string(),
+                options: vec![],
+            }];
             qm2.request(questions).await.unwrap()
         });
 
@@ -75,7 +78,9 @@ mod tests {
     async fn test_resolve_unknown_id_is_noop() {
         let hub = RootWireHub::new();
         let qm = QuestionManager::new(hub);
-        qm.resolve("unknown".to_string(), vec!["x".to_string()]).await.unwrap();
+        qm.resolve("unknown".to_string(), vec!["x".to_string()])
+            .await
+            .unwrap();
         // Should not panic
     }
 
@@ -96,14 +101,18 @@ mod tests {
 
         let qm2 = qm.clone();
         let handle = tokio::spawn(async move {
-            let questions = vec![
-                Question { question: "Q1".to_string(), options: vec!["a".to_string(), "b".to_string()] },
-            ];
+            let questions = vec![Question {
+                question: "Q1".to_string(),
+                options: vec!["a".to_string(), "b".to_string()],
+            }];
             qm2.request(questions).await.unwrap()
         });
 
         // Receive the broadcast
-        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await.unwrap().unwrap();
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(envelope.event, WireEvent::QuestionRequest { .. }));
 
         // Resolve so the test doesn't hang

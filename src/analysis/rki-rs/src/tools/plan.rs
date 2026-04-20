@@ -1,7 +1,7 @@
+use crate::tools::function_toolkit::FunctionTool;
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
-use crate::tools::function_toolkit::FunctionTool;
 
 /// Stateless function tool: enter_plan_mode (§7.2 deviation prototype).
 pub fn enter_plan_mode_tool() -> FunctionTool {
@@ -34,8 +34,12 @@ pub struct EnterPlanModeTool;
 
 #[async_trait]
 impl Tool for EnterPlanModeTool {
-    fn name(&self) -> &str { "enter_plan_mode" }
-    fn description(&self) -> &str { "Enter plan mode (read-only research). No tools will be used." }
+    fn name(&self) -> &str {
+        "enter_plan_mode"
+    }
+    fn description(&self) -> &str {
+        "Enter plan mode (read-only research). No tools will be used."
+    }
     fn schema(&self) -> Value {
         serde_json::json!({ "type": "object", "properties": {} })
     }
@@ -97,8 +101,12 @@ pub struct ExitPlanModeTool;
 
 #[async_trait]
 impl Tool for ExitPlanModeTool {
-    fn name(&self) -> &str { "exit_plan_mode" }
-    fn description(&self) -> &str { "Exit plan mode and resume normal tool-using operation." }
+    fn name(&self) -> &str {
+        "exit_plan_mode"
+    }
+    fn description(&self) -> &str {
+        "Exit plan mode and resume normal tool-using operation."
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -132,12 +140,12 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::Runtime;
-    use crate::config::Config;
     use crate::approval::ApprovalRuntime;
-    use crate::wire::RootWireHub;
+    use crate::config::Config;
+    use crate::runtime::Runtime;
     use crate::session::Session;
     use crate::store::Store;
+    use crate::wire::RootWireHub;
     use std::sync::Arc;
 
     fn test_ctx() -> ToolContext {
@@ -147,9 +155,15 @@ mod tests {
         let runtime = Runtime::new(
             Config::default(),
             Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-            approval, hub, store,
+            approval,
+            hub,
+            store,
         );
-        ToolContext { runtime, hub: None, token: crate::token::ContextToken::new("test", "turn") }
+        ToolContext {
+            runtime,
+            hub: None,
+            token: crate::token::ContextToken::new("test", "turn"),
+        }
     }
 
     #[tokio::test]

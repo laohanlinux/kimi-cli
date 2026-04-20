@@ -7,5 +7,5 @@ pub mod executor;
 pub mod manager;
 pub mod types;
 
-pub use manager::{task_events_stream, BackgroundTaskManager};
+pub use manager::{BackgroundTaskManager, task_events_stream};
 pub use types::*;

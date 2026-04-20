@@ -14,7 +14,10 @@ pub struct FunctionTool {
     description: String,
     schema: Value,
     handler: Box<
-        dyn Fn(Value, &ToolContext) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolOutput>> + Send>>
+        dyn Fn(
+                Value,
+                &ToolContext,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolOutput>> + Send>>
             + Send
             + Sync,
     >,
@@ -38,8 +41,6 @@ impl FunctionTool {
             handler: Box::new(move |args, ctx| Box::pin(handler(args, ctx))),
         }
     }
-
-
 }
 
 #[async_trait]
@@ -131,7 +132,7 @@ macro_rules! tool_fn {
 mod tests {
     use super::*;
     use crate::message::ContentBlock;
-    use crate::tools::{ToolResult, ToolMetrics};
+    use crate::tools::{ToolMetrics, ToolResult};
 
     #[tokio::test]
     async fn test_function_tool_basic() {
@@ -249,7 +250,10 @@ mod tests {
             token: crate::token::ContextToken::new("test", "test-turn"),
         };
 
-        let result = tool.call(serde_json::json!({ "a": 3, "b": 4 }), &ctx).await.unwrap();
+        let result = tool
+            .call(serde_json::json!({ "a": 3, "b": 4 }), &ctx)
+            .await
+            .unwrap();
         match &result.result.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "7"),
             _ => panic!("Expected text block"),
@@ -258,8 +262,8 @@ mod tests {
 
     #[test]
     fn test_function_tool_builder_default_schema() {
-        let tool = FunctionToolBuilder::new("noop", "No operation")
-            .handler(|_args: Value, _ctx: &ToolContext| async move {
+        let tool = FunctionToolBuilder::new("noop", "No operation").handler(
+            |_args: Value, _ctx: &ToolContext| async move {
                 Ok(ToolOutput {
                     result: ToolResult {
                         r#type: "success".to_string(),
@@ -269,7 +273,8 @@ mod tests {
                     artifacts: vec![],
                     metrics: ToolMetrics::default(),
                 })
-            });
+            },
+        );
 
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
@@ -277,17 +282,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_fn_macro() {
-        let tool = tool_fn!("macro_echo", "Macro echo", |args: Value, _ctx: &ToolContext| async move {
-            Ok(ToolOutput {
-                result: ToolResult {
-                    r#type: "success".to_string(),
-                    content: vec![ContentBlock::Text { text: args.to_string() }],
-                    summary: "Echo".to_string(),
-                },
-                artifacts: vec![],
-                metrics: ToolMetrics::default(),
-            })
-        });
+        let tool = tool_fn!(
+            "macro_echo",
+            "Macro echo",
+            |args: Value, _ctx: &ToolContext| async move {
+                Ok(ToolOutput {
+                    result: ToolResult {
+                        r#type: "success".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: args.to_string(),
+                        }],
+                        summary: "Echo".to_string(),
+                    },
+                    artifacts: vec![],
+                    metrics: ToolMetrics::default(),
+                })
+            }
+        );
 
         assert_eq!(tool.name(), "macro_echo");
         assert_eq!(tool.description(), "Macro echo");

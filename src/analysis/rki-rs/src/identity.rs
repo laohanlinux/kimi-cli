@@ -46,13 +46,16 @@ impl EnvCredentialStore {
 impl CredentialStore for EnvCredentialStore {
     async fn get(&self, key: &str) -> anyhow::Result<Option<Credential>> {
         let var_name = format!("{}{}", self.prefix, key.to_uppercase());
-        Ok(std::env::var(&var_name).ok().filter(|s| !s.is_empty()).map(|value| Credential {
-            key: key.to_string(),
-            value,
-            provider: "env".to_string(),
-            expires_at: None,
-            refresh_token: None,
-        }))
+        Ok(std::env::var(&var_name)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|value| Credential {
+                key: key.to_string(),
+                value,
+                provider: "env".to_string(),
+                expires_at: None,
+                refresh_token: None,
+            }))
     }
 
     async fn set(&self, _key: &str, _credential: &Credential) -> anyhow::Result<()> {
@@ -180,7 +183,11 @@ pub struct ApiKeyProvider {
 }
 
 impl ApiKeyProvider {
-    pub fn new(name: impl Into<String>, store: Box<dyn CredentialStore>, key_name: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        store: Box<dyn CredentialStore>,
+        key_name: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             store,
@@ -191,10 +198,14 @@ impl ApiKeyProvider {
 
 #[async_trait]
 impl IdentityProvider for ApiKeyProvider {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     async fn authenticate(&self) -> anyhow::Result<Credential> {
-        self.store.get(&self.key_name).await?
+        self.store
+            .get(&self.key_name)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("API key '{}' not found", self.key_name))
     }
 
@@ -222,13 +233,19 @@ impl IdentityManager {
         }
     }
 
-    pub fn register_provider(&mut self, name: impl Into<String>, provider: Box<dyn IdentityProvider>) {
+    pub fn register_provider(
+        &mut self,
+        name: impl Into<String>,
+        provider: Box<dyn IdentityProvider>,
+    ) {
         self.providers.insert(name.into(), provider);
     }
 
     #[allow(dead_code)]
     pub async fn resolve(&self, provider_name: &str) -> anyhow::Result<Credential> {
-        let provider = self.providers.get(provider_name)
+        let provider = self
+            .providers
+            .get(provider_name)
             .ok_or_else(|| anyhow::anyhow!("Unknown identity provider: {}", provider_name))?;
         provider.authenticate().await
     }
@@ -241,7 +258,9 @@ impl IdentityManager {
     pub fn default_for_kimi() -> anyhow::Result<Self> {
         let env_store = Box::new(EnvCredentialStore::new(""));
         let file_store = Box::new(FileCredentialStore::new(
-            &dirs::home_dir().unwrap_or_default().join(".kimi/credentials")
+            &dirs::home_dir()
+                .unwrap_or_default()
+                .join(".kimi/credentials"),
         )?);
         let chained = Box::new(ChainedCredentialStore::new(vec![env_store, file_store]));
 
@@ -251,28 +270,38 @@ impl IdentityManager {
         let openai_store: Box<dyn CredentialStore> = {
             let env = Box::new(EnvCredentialStore::new(""));
             let file = Box::new(FileCredentialStore::new(
-                &dirs::home_dir().unwrap_or_default().join(".kimi/credentials")
+                &dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".kimi/credentials"),
             )?);
             Box::new(ChainedCredentialStore::new(vec![env, file]))
         };
-        manager.register_provider("openai", Box::new(ApiKeyProvider::new(
+        manager.register_provider(
             "openai",
-            openai_store,
-            "OPENAI_API_KEY",
-        )));
+            Box::new(ApiKeyProvider::new(
+                "openai",
+                openai_store,
+                "OPENAI_API_KEY",
+            )),
+        );
 
         let anthropic_store: Box<dyn CredentialStore> = {
             let env = Box::new(EnvCredentialStore::new(""));
             let file = Box::new(FileCredentialStore::new(
-                &dirs::home_dir().unwrap_or_default().join(".kimi/credentials")
+                &dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".kimi/credentials"),
             )?);
             Box::new(ChainedCredentialStore::new(vec![env, file]))
         };
-        manager.register_provider("anthropic", Box::new(ApiKeyProvider::new(
+        manager.register_provider(
             "anthropic",
-            anthropic_store,
-            "ANTHROPIC_API_KEY",
-        )));
+            Box::new(ApiKeyProvider::new(
+                "anthropic",
+                anthropic_store,
+                "ANTHROPIC_API_KEY",
+            )),
+        );
 
         Ok(manager)
     }
@@ -284,7 +313,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_env_credential_store() {
-        unsafe { std::env::set_var("TEST_API_KEY", "secret123"); }
+        unsafe {
+            std::env::set_var("TEST_API_KEY", "secret123");
+        }
         let store = EnvCredentialStore::new("TEST_");
         let cred = store.get("API_KEY").await.unwrap();
         assert!(cred.is_some());
@@ -378,7 +409,11 @@ mod tests {
         let store = Box::new(FileCredentialStore::new(temp.path()).unwrap());
         let mut manager = IdentityManager::new(store);
 
-        let provider = Box::new(ApiKeyProvider::new("test", Box::new(FileCredentialStore::new(temp.path()).unwrap()), "my_key"));
+        let provider = Box::new(ApiKeyProvider::new(
+            "test",
+            Box::new(FileCredentialStore::new(temp.path()).unwrap()),
+            "my_key",
+        ));
         manager.register_provider("test", provider);
 
         let key = manager.get_key("my_key").await.unwrap();

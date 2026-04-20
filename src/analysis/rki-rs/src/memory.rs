@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 mod embedding;
 pub use embedding::{
-    cosine_similarity, parse_embedding_json, parse_openai_embedding_batch, EmbeddingProvider,
-    HashEmbeddingProvider, HttpEmbeddingProvider,
+    EmbeddingProvider, HashEmbeddingProvider, HttpEmbeddingProvider, cosine_similarity,
+    parse_embedding_json, parse_openai_embedding_batch,
 };
 
 const RECALL_NGRAM_WEIGHT: f32 = 2.5;
@@ -84,7 +84,11 @@ fn working_recall_fragment_score(query: &str, text: &str) -> f32 {
 
 fn recall_ngram_score(query: &str, document: &str) -> f32 {
     let q_norm = recall_norm_alnum(query);
-    let n = if q_norm.chars().count() >= 3 { 3usize } else { 2usize };
+    let n = if q_norm.chars().count() >= 3 {
+        3usize
+    } else {
+        2usize
+    };
     let q_grams = recall_char_ngrams(&q_norm, n);
     if q_grams.is_empty() {
         return 0.0;
@@ -150,7 +154,11 @@ impl WorkingMemory {
 
     pub fn is_full(&self) -> bool {
         // Count user messages as "turns"
-        let turns = self.messages.iter().filter(|m| matches!(m, Message::User(_))).count();
+        let turns = self
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::User(_)))
+            .count();
         turns >= self.max_turns
     }
 
@@ -492,7 +500,10 @@ impl MemoryHierarchy {
             let to_compact = self.working.extract_oldest(10); // keep last 10 messages
             if !to_compact.is_empty() {
                 let summary = self.summarize_messages(&to_compact).await;
-                let turns = to_compact.iter().filter(|m| matches!(m, Message::User(_))).count();
+                let turns = to_compact
+                    .iter()
+                    .filter(|m| matches!(m, Message::User(_)))
+                    .count();
                 self.episodic.add_episode(summary, turns);
             }
         }
@@ -539,7 +550,11 @@ impl MemoryHierarchy {
     }
 
     async fn summarize_messages(&self, messages: &[Message]) -> String {
-        let texts: Vec<String> = messages.iter().map(message_to_text).filter(|s| !s.is_empty()).collect();
+        let texts: Vec<String> = messages
+            .iter()
+            .map(message_to_text)
+            .filter(|s| !s.is_empty())
+            .collect();
         if texts.is_empty() {
             return "[Empty episode]".to_string();
         }
@@ -557,10 +572,13 @@ impl MemoryHierarchy {
                     while let Some(part) = generation.next_chunk().await {
                         parts.push(part);
                     }
-                    let summary: String = parts.iter().filter_map(|p| match p {
-                        ContentPart::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    }).collect();
+                    let summary: String = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
                     if !summary.trim().is_empty() {
                         return summary.trim().to_string();
                     }
@@ -575,7 +593,12 @@ impl MemoryHierarchy {
         if texts.len() <= 3 {
             format!("[Episode: {}]", texts.join("; "))
         } else {
-            format!("[Episode with {} messages: {} ... {}]", texts.len(), texts.first().unwrap(), texts.last().unwrap())
+            format!(
+                "[Episode with {} messages: {} ... {}]",
+                texts.len(),
+                texts.first().unwrap(),
+                texts.last().unwrap()
+            )
         }
     }
 }
@@ -585,18 +608,23 @@ fn message_to_text(msg: &Message) -> String {
         Message::System { content } => content.clone(),
         Message::User(u) => u.flatten_for_recall(),
         Message::Assistant { content, .. } => content.as_ref().cloned().unwrap_or_default(),
-        Message::Tool { content, .. } => {
-            content.iter().map(|b| match b {
+        Message::Tool { content, .. } => content
+            .iter()
+            .map(|b| match b {
                 crate::message::ContentBlock::Text { text } => text.clone(),
                 _ => String::new(),
-            }).collect::<Vec<_>>().join(" ")
-        }
-        Message::ToolEvent(ev) => {
-            ev.content.iter().map(|b| match b {
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Message::ToolEvent(ev) => ev
+            .content
+            .iter()
+            .map(|b| match b {
                 crate::message::ContentBlock::Text { text } => text.clone(),
                 _ => String::new(),
-            }).collect::<Vec<_>>().join(" ")
-        }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
         Message::SystemPrompt { content } => content.clone(),
         Message::Checkpoint { .. } => String::new(),
         Message::Usage { .. } => String::new(),
@@ -675,7 +703,10 @@ mod tests {
         // Push enough messages to trigger working memory overflow
         for i in 0..50 {
             mh.push(Message::User(UserMessage::text(format!("message {}", i))));
-            mh.push(Message::Assistant { content: Some(format!("reply {}", i)), tool_calls: None });
+            mh.push(Message::Assistant {
+                content: Some(format!("reply {}", i)),
+                tool_calls: None,
+            });
         }
 
         assert!(!mh.working.is_empty());
@@ -695,8 +726,12 @@ mod tests {
         let results = mh.recall("API design", 5);
         assert!(!results.is_empty());
         // Should have at least semantic and episodic results
-        let has_semantic = results.iter().any(|r| matches!(r.source, MemoryTier::Semantic));
-        let has_episodic = results.iter().any(|r| matches!(r.source, MemoryTier::Episodic));
+        let has_semantic = results
+            .iter()
+            .any(|r| matches!(r.source, MemoryTier::Semantic));
+        let has_episodic = results
+            .iter()
+            .any(|r| matches!(r.source, MemoryTier::Episodic));
         assert!(has_semantic || has_episodic);
     }
 
@@ -731,9 +766,15 @@ mod tests {
         let mut wm = WorkingMemory::new(3);
         assert!(!wm.is_full());
         wm.push(Message::User(UserMessage::text("1")));
-        wm.push(Message::Assistant { content: Some("a".to_string()), tool_calls: None });
+        wm.push(Message::Assistant {
+            content: Some("a".to_string()),
+            tool_calls: None,
+        });
         wm.push(Message::User(UserMessage::text("2")));
-        wm.push(Message::Assistant { content: Some("b".to_string()), tool_calls: None });
+        wm.push(Message::Assistant {
+            content: Some("b".to_string()),
+            tool_calls: None,
+        });
         wm.push(Message::User(UserMessage::text("3")));
         assert!(wm.is_full());
     }
@@ -903,7 +944,10 @@ mod tests {
         // Push enough messages to trigger working memory overflow
         for i in 0..50 {
             mh.push(Message::User(UserMessage::text(format!("message {}", i))));
-            mh.push(Message::Assistant { content: Some(format!("reply {}", i)), tool_calls: None });
+            mh.push(Message::Assistant {
+                content: Some(format!("reply {}", i)),
+                tool_calls: None,
+            });
         }
 
         mh.compact().await;

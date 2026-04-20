@@ -3,31 +3,37 @@
 //! `Runtime` holds all shared state (config, session, approval, wire hub,
 //! toolset, background manager, etc.) and is cloned into tools and async tasks.
 
+use crate::agent::{AgentSpec, LaborMarket};
 use crate::approval::ApprovalRuntime;
 use crate::background::BackgroundTaskManager;
 use crate::capability_registry::CapabilityRegistry;
 use crate::config::Config;
+use crate::feature_flags::{ExperimentalFeature, FeatureFlags};
 use crate::hooks::SideEffectEngine;
 use crate::identity::IdentityManager;
 use crate::injection::InjectionEngine;
 use crate::notification::NotificationManager;
-use crate::orchestrator::{PlanModeOrchestrator, RalphOrchestrator, ReActOrchestrator, TurnOrchestrator};
+use crate::orchestrator::{
+    PlanModeOrchestrator, RalphOrchestrator, ReActOrchestrator, TurnOrchestrator,
+};
 use crate::question::QuestionManager;
-use crate::agent::{AgentSpec, LaborMarket};
-use crate::token::ContextToken;
 use crate::session::Session;
 use crate::slash::SlashRegistry;
 use crate::soul::denwa_renji::DenwaRenji;
-use crate::feature_flags::{ExperimentalFeature, FeatureFlags};
 use crate::steer::SteerQueue;
 use crate::store::Store;
 use crate::stream::SessionStream;
+use crate::token::ContextToken;
 use crate::toolset::Toolset;
 use crate::wire::RootWireHub;
 use std::sync::Arc;
 
 /// Resolve the initial orchestrator, applying A/B testing when the feature flag is enabled.
-fn resolve_orchestrator<'a>(config: &'a Config, session_id: &str, features: &FeatureFlags) -> &'a str {
+fn resolve_orchestrator<'a>(
+    config: &'a Config,
+    session_id: &str,
+    features: &FeatureFlags,
+) -> &'a str {
     use crate::feature_flags::ExperimentalFeature;
 
     // If explicitly set to something other than react, respect it
@@ -37,14 +43,10 @@ fn resolve_orchestrator<'a>(config: &'a Config, session_id: &str, features: &Fea
 
     // A/B test: deterministic split based on session ID hash
     if features.is_enabled(ExperimentalFeature::OrchestratorAbTest) {
-        let hash = session_id.bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
-        if hash % 2 == 0 {
-            "plan"
-        } else {
-            "react"
-        }
+        let hash = session_id
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        if hash % 2 == 0 { "plan" } else { "react" }
     } else {
         "react"
     }
@@ -92,7 +94,14 @@ impl Runtime {
         hub: RootWireHub,
         store: Store,
     ) -> Self {
-        Self::with_features(config, session, approval, hub, store, FeatureFlags::default())
+        Self::with_features(
+            config,
+            session,
+            approval,
+            hub,
+            store,
+            FeatureFlags::default(),
+        )
     }
 
     pub fn with_features(
@@ -126,7 +135,9 @@ impl Runtime {
         let denwa_renji = Arc::new(DenwaRenji::new());
         let notifications = NotificationManager::new(session.id.clone(), store.clone());
         let hooks = SideEffectEngine::new();
-        let identity = Arc::new(IdentityManager::default_for_kimi().unwrap_or_else(|_| IdentityManager::new(Box::new(crate::identity::EnvCredentialStore::new("")))));
+        let identity = Arc::new(IdentityManager::default_for_kimi().unwrap_or_else(|_| {
+            IdentityManager::new(Box::new(crate::identity::EnvCredentialStore::new("")))
+        }));
         let slash_registry = SlashRegistry::default();
         let steer_queue = Arc::new(SteerQueue::new());
         let mut injection = InjectionEngine::new();
@@ -219,7 +230,8 @@ impl Runtime {
     }
 
     pub async fn enter_ralph_mode(&self, max_iterations: usize) {
-        self.set_orchestrator(Arc::new(RalphOrchestrator::new(max_iterations))).await;
+        self.set_orchestrator(Arc::new(RalphOrchestrator::new(max_iterations)))
+            .await;
     }
 
     pub async fn is_plan_mode(&self) -> bool {
@@ -325,10 +337,14 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.toml");
-        std::fs::write(&config_path, r#"
+        std::fs::write(
+            &config_path,
+            r#"
 [models]
 default_model = "gpt-4"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         rt.reload_config(&config_path).await.unwrap();
         let cfg = rt.config.read().await;

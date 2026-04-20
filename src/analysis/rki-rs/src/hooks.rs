@@ -63,7 +63,8 @@ pub trait SideEffect: Send + Sync {
 #[derive(Clone)]
 #[allow(clippy::type_complexity)]
 pub struct SideEffectEngine {
-    effects: std::sync::Arc<std::sync::Mutex<HashMap<HookStage, Vec<std::sync::Arc<dyn SideEffect>>>>>,
+    effects:
+        std::sync::Arc<std::sync::Mutex<HashMap<HookStage, Vec<std::sync::Arc<dyn SideEffect>>>>>,
 }
 
 impl SideEffectEngine {
@@ -75,10 +76,7 @@ impl SideEffectEngine {
 
     pub fn register(&self, effect: std::sync::Arc<dyn SideEffect>) {
         let mut effects = self.effects.lock().unwrap();
-        effects
-            .entry(effect.stage())
-            .or_default()
-            .push(effect);
+        effects.entry(effect.stage()).or_default().push(effect);
     }
 
     /// Run all effects for the given stage. Returns Block if ANY effect returns Block.
@@ -124,11 +122,7 @@ impl SideEffectEngine {
                             e
                         ));
                     } else {
-                        tracing::warn!(
-                            "Non-critical side effect {} failed: {}",
-                            effect.name(),
-                            e
-                        );
+                        tracing::warn!("Non-critical side effect {} failed: {}", effect.name(), e);
                     }
                 }
             }
@@ -144,9 +138,15 @@ pub struct AuditLogger;
 
 #[async_trait]
 impl SideEffect for AuditLogger {
-    fn name(&self) -> &str { "audit_logger" }
-    fn stage(&self) -> HookStage { HookStage::Audit }
-    fn is_critical(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "audit_logger"
+    }
+    fn stage(&self) -> HookStage {
+        HookStage::Audit
+    }
+    fn is_critical(&self) -> bool {
+        false
+    }
 
     async fn execute(&self, event: &str, payload: &Value) -> anyhow::Result<SideEffectResult> {
         tracing::info!(target: "audit", "event={} payload={}", event, payload);
@@ -159,9 +159,15 @@ pub struct DestructiveGuard;
 
 #[async_trait]
 impl SideEffect for DestructiveGuard {
-    fn name(&self) -> &str { "destructive_guard" }
-    fn stage(&self) -> HookStage { HookStage::PreValidate }
-    fn is_critical(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "destructive_guard"
+    }
+    fn stage(&self) -> HookStage {
+        HookStage::PreValidate
+    }
+    fn is_critical(&self) -> bool {
+        true
+    }
 
     async fn execute(&self, _event: &str, payload: &Value) -> anyhow::Result<SideEffectResult> {
         if let Some(cmd) = payload.get("command").and_then(|v| v.as_str()) {
@@ -186,7 +192,10 @@ mod tests {
     #[tokio::test]
     async fn test_empty_engine_allows() {
         let engine = SideEffectEngine::new();
-        let result = engine.run(HookStage::PreExecute, "test", &serde_json::json!({})).await.unwrap();
+        let result = engine
+            .run(HookStage::PreExecute, "test", &serde_json::json!({}))
+            .await
+            .unwrap();
         assert_eq!(result.decision, EffectDecision::Allow);
     }
 
@@ -194,11 +203,14 @@ mod tests {
     async fn test_destructive_guard_blocks() {
         let engine = SideEffectEngine::new();
         engine.register(std::sync::Arc::new(DestructiveGuard));
-        let result = engine.run(
-            HookStage::PreValidate,
-            "shell",
-            &serde_json::json!({"command": "rm -rf /home"}),
-        ).await.unwrap();
+        let result = engine
+            .run(
+                HookStage::PreValidate,
+                "shell",
+                &serde_json::json!({"command": "rm -rf /home"}),
+            )
+            .await
+            .unwrap();
         assert!(matches!(result.decision, EffectDecision::Block { .. }));
     }
 
@@ -206,11 +218,14 @@ mod tests {
     async fn test_destructive_guard_allows_safe() {
         let engine = SideEffectEngine::new();
         engine.register(std::sync::Arc::new(DestructiveGuard));
-        let result = engine.run(
-            HookStage::PreValidate,
-            "shell",
-            &serde_json::json!({"command": "echo hello"}),
-        ).await.unwrap();
+        let result = engine
+            .run(
+                HookStage::PreValidate,
+                "shell",
+                &serde_json::json!({"command": "echo hello"}),
+            )
+            .await
+            .unwrap();
         assert_eq!(result.decision, EffectDecision::Allow);
     }
 
@@ -219,11 +234,14 @@ mod tests {
         let engine = SideEffectEngine::new();
         engine.register(std::sync::Arc::new(DestructiveGuard));
         engine.register(std::sync::Arc::new(DestructiveGuard));
-        let result = engine.run(
-            HookStage::PreValidate,
-            "shell",
-            &serde_json::json!({"command": "rm -rf /"}),
-        ).await.unwrap();
+        let result = engine
+            .run(
+                HookStage::PreValidate,
+                "shell",
+                &serde_json::json!({"command": "rm -rf /"}),
+            )
+            .await
+            .unwrap();
         assert!(matches!(result.decision, EffectDecision::Block { .. }));
     }
 
@@ -231,11 +249,14 @@ mod tests {
     async fn test_hook_allows_non_destructive_tools() {
         let engine = SideEffectEngine::new();
         engine.register(std::sync::Arc::new(DestructiveGuard));
-        let result = engine.run(
-            HookStage::PreValidate,
-            "read_file",
-            &serde_json::json!({"path": "/etc/passwd"}),
-        ).await.unwrap();
+        let result = engine
+            .run(
+                HookStage::PreValidate,
+                "read_file",
+                &serde_json::json!({"path": "/etc/passwd"}),
+            )
+            .await
+            .unwrap();
         assert_eq!(result.decision, EffectDecision::Allow);
     }
 }

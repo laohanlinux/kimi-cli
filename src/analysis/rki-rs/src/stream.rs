@@ -65,7 +65,10 @@ impl SessionStream {
     }
 
     /// Subscribe with replay: returns historical events plus a live receiver.
-    pub fn subscribe_with_replay(&self, from_cursor: i64) -> anyhow::Result<(Vec<WireEnvelope>, broadcast::Receiver<WireEnvelope>)> {
+    pub fn subscribe_with_replay(
+        &self,
+        from_cursor: i64,
+    ) -> anyhow::Result<(Vec<WireEnvelope>, broadcast::Receiver<WireEnvelope>)> {
         let history = self.replay(from_cursor)?;
         let live = self.subscribe_live();
         Ok((history, live))
@@ -75,7 +78,7 @@ impl SessionStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{WireEvent, UserInput};
+    use crate::wire::{UserInput, WireEvent};
 
     #[tokio::test]
     async fn test_session_stream_persist_and_replay() {
@@ -87,7 +90,9 @@ mod tests {
         stream.publish(WireEvent::TurnBegin {
             user_input: UserInput::text_only("hello"),
         });
-        stream.publish(WireEvent::TextPart { text: "world".to_string() });
+        stream.publish(WireEvent::TextPart {
+            text: "world".to_string(),
+        });
 
         // Give persistence task a moment to write
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -159,7 +164,9 @@ mod tests {
         let hub = RootWireHub::new();
         let stream = SessionStream::new("swr-session".to_string(), store.clone(), hub);
 
-        stream.publish(WireEvent::TextPart { text: "past".to_string() });
+        stream.publish(WireEvent::TextPart {
+            text: "past".to_string(),
+        });
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let (history, mut live) = stream.subscribe_with_replay(0).unwrap();

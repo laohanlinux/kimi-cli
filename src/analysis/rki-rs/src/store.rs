@@ -3,7 +3,7 @@
 //! Single `Store` per process; all operations are synchronised via a
 //! mutex around the SQLite connection.
 
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -32,6 +32,36 @@ pub struct UnifiedSessionEvent {
     pub kind: String,
     pub body: String,
     pub created_at: String,
+}
+
+/// Full notification row from SQLite (offset tail, claims, exports).
+#[derive(Debug, Clone)]
+pub struct NotificationRecord {
+    pub id: String,
+    pub category: String,
+    pub kind: String,
+    pub severity: String,
+    pub payload: String,
+    pub created_at: String,
+    pub title: String,
+    pub body: String,
+    pub source_kind: String,
+    pub source_id: String,
+}
+
+fn notification_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotificationRecord> {
+    Ok(NotificationRecord {
+        id: row.get(0)?,
+        category: row.get(1)?,
+        kind: row.get(2)?,
+        severity: row.get(3)?,
+        payload: row.get(4)?,
+        created_at: row.get(5)?,
+        title: row.get(6)?,
+        body: row.get(7)?,
+        source_kind: row.get(8)?,
+        source_id: row.get(9)?,
+    })
 }
 
 impl Store {
@@ -64,10 +94,15 @@ impl Store {
             };
             // Migration: add dedupe_key to existing notifications tables
             if !column_exists("notifications", "dedupe_key") {
-                let _ = conn.execute(
-                    "ALTER TABLE notifications ADD COLUMN dedupe_key TEXT",
-                    [],
-                );
+                let _ = conn.execute("ALTER TABLE notifications ADD COLUMN dedupe_key TEXT", []);
+            }
+            for col in ["title", "body", "source_kind", "source_id"] {
+                if !column_exists("notifications", col) {
+                    let _ = conn.execute(
+                        &format!("ALTER TABLE notifications ADD COLUMN {col} TEXT DEFAULT ''"),
+                        [],
+                    );
+                }
             }
             // Migration: add archived to existing sessions table
             if !column_exists("sessions", "archived") {
@@ -77,10 +112,7 @@ impl Store {
                 );
             }
             if !column_exists("sessions", "parent_session_id") {
-                let _ = conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
-                    [],
-                );
+                let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
             }
             if !column_exists("sessions", "fork_parent_context_rowid") {
                 let _ = conn.execute(
@@ -146,6 +178,10 @@ impl Store {
                 severity TEXT,
                 payload TEXT,
                 dedupe_key TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT '',
+                source_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS tasks (
@@ -214,8 +250,7 @@ impl Store {
     /// Parent session when this row was created via [`crate::session::Session::fork`].
     pub fn get_parent_session_id(&self, session_id: &str) -> SqlResult<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT parent_session_id FROM sessions WHERE id = ?1")?;
+        let mut stmt = conn.prepare("SELECT parent_session_id FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query(params![session_id])?;
         if let Some(row) = rows.next()? {
             Ok(row.get::<_, Option<String>>(0)?)
@@ -227,9 +262,8 @@ impl Store {
     /// Direct forks of `parent_session_id` (newest child first).
     pub fn list_child_session_ids(&self, parent_session_id: &str) -> SqlResult<Vec<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id FROM sessions WHERE parent_session_id = ?1 ORDER BY rowid DESC",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM sessions WHERE parent_session_id = ?1 ORDER BY rowid DESC")?;
         let rows = stmt.query_map(params![parent_session_id], |row| row.get(0))?;
         rows.collect()
     }
@@ -275,7 +309,9 @@ impl Store {
                 SELECT 'wire', id, event_type, substr(payload, 1, 8000), created_at \
                 FROM wire_events WHERE session_id = ?1 \
                 UNION ALL \
-                SELECT 'notification', rowid, coalesce(kind, ''), substr(coalesce(payload, ''), 1, 8000), created_at \
+                SELECT 'notification', rowid, coalesce(kind, ''), \
+                       substr(coalesce(title, '') || char(10) || coalesce(body, '') || char(10) || coalesce(payload, ''), 1, 8000), \
+                       created_at \
                 FROM notifications WHERE session_id = ?1 \
                 UNION ALL \
                 SELECT 'task', rowid, coalesce(status, ''), \
@@ -314,9 +350,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, work_dir, created_at FROM sessions ORDER BY datetime(created_at) DESC, rowid DESC"
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect()
     }
 
@@ -325,9 +359,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, work_dir, created_at FROM sessions WHERE archived = 0 ORDER BY datetime(created_at) DESC, rowid DESC"
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect()
     }
 
@@ -384,7 +416,11 @@ impl Store {
         Ok(affected)
     }
 
-    pub fn revert_context_to_checkpoint(&self, session_id: &str, checkpoint_id: i64) -> SqlResult<usize> {
+    pub fn revert_context_to_checkpoint(
+        &self,
+        session_id: &str,
+        checkpoint_id: i64,
+    ) -> SqlResult<usize> {
         let conn = self.conn.lock().unwrap();
         let affected = conn.execute(
             "DELETE FROM context_entries WHERE session_id = ?1 AND id > (SELECT COALESCE(MAX(id), 0) FROM context_entries WHERE session_id = ?1 AND checkpoint_id = ?2)",
@@ -413,7 +449,12 @@ impl Store {
         }
     }
 
-    pub fn append_wire_event(&self, session_id: &str, event_type: &str, payload: &str) -> SqlResult<()> {
+    pub fn append_wire_event(
+        &self,
+        session_id: &str,
+        event_type: &str,
+        payload: &str,
+    ) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO wire_events (session_id, event_type, payload, created_at) VALUES (?1, ?2, ?3, datetime('now'))",
@@ -425,7 +466,7 @@ impl Store {
     pub fn get_wire_events(&self, session_id: &str) -> SqlResult<Vec<(i64, String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, event_type, payload FROM wire_events WHERE session_id = ?1 ORDER BY id"
+            "SELECT id, event_type, payload FROM wire_events WHERE session_id = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -500,61 +541,74 @@ impl Store {
         severity: &str,
         payload: &str,
         dedupe_key: Option<&str>,
+        title: &str,
+        body: &str,
+        source_kind: &str,
+        source_id: &str,
     ) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO notifications (id, session_id, category, kind, severity, payload, dedupe_key, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
-            params![id, session_id, category, kind, severity, payload, dedupe_key],
+            "INSERT INTO notifications (id, session_id, category, kind, severity, payload, dedupe_key, title, body, source_kind, source_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))",
+            params![
+                id,
+                session_id,
+                category,
+                kind,
+                severity,
+                payload,
+                dedupe_key,
+                title,
+                body,
+                source_kind,
+                source_id
+            ],
         )?;
         Ok(())
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn get_notifications(&self, session_id: &str) -> SqlResult<Vec<(String, String, String, String, String)>> {
+    pub fn get_notifications(&self, session_id: &str) -> SqlResult<Vec<NotificationRecord>> {
+        const SEL: &str = "SELECT id, category, kind, severity, payload, created_at, \
+            title, body, source_kind, source_id FROM notifications WHERE session_id = ?1 ORDER BY created_at";
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, category, kind, severity, payload FROM notifications WHERE session_id = ?1 ORDER BY created_at"
-        )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-        })?;
+        let mut stmt = conn.prepare(SEL)?;
+        let rows = stmt.query_map(params![session_id], notification_record_from_row)?;
         rows.collect()
     }
 
     /// List notifications in insertion order, optionally only those after `after_notification_id` (§8.4 rowid tail).
-    #[allow(clippy::type_complexity)]
     pub fn list_notifications_after(
         &self,
         session_id: &str,
         after_notification_id: Option<&str>,
         limit: usize,
-    ) -> SqlResult<Vec<(String, String, String, String, String)>> {
+    ) -> SqlResult<Vec<NotificationRecord>> {
+        const SEL_TAIL: &str = "SELECT id, category, kind, severity, payload, created_at, \
+            title, body, source_kind, source_id FROM notifications \
+             WHERE session_id = ?1 ORDER BY rowid ASC LIMIT ?2";
+        const SEL_AFTER: &str = "SELECT id, category, kind, severity, payload, created_at, \
+            title, body, source_kind, source_id FROM notifications \
+             WHERE session_id = ?1 \
+               AND rowid > COALESCE(\
+                 (SELECT rowid FROM notifications WHERE id = ?2 AND session_id = ?1),\
+                 0\
+               ) \
+             ORDER BY rowid ASC LIMIT ?3";
         let conn = self.conn.lock().unwrap();
         let cap = limit.clamp(1, 500);
         match after_notification_id {
             None => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, category, kind, severity, payload FROM notifications \
-                     WHERE session_id = ?1 ORDER BY rowid ASC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![session_id, cap], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-                })?;
+                let mut stmt = conn.prepare(SEL_TAIL)?;
+                let rows =
+                    stmt.query_map(params![session_id, cap], notification_record_from_row)?;
                 rows.collect()
             }
             Some(after) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, category, kind, severity, payload FROM notifications \
-                     WHERE session_id = ?1 \
-                       AND rowid > COALESCE(\
-                         (SELECT rowid FROM notifications WHERE id = ?2 AND session_id = ?1),\
-                         0\
-                       ) \
-                     ORDER BY rowid ASC LIMIT ?3",
+                let mut stmt = conn.prepare(SEL_AFTER)?;
+                let rows = stmt.query_map(
+                    params![session_id, after, cap],
+                    notification_record_from_row,
                 )?;
-                let rows = stmt.query_map(params![session_id, after, cap], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-                })?;
                 rows.collect()
             }
         }
@@ -562,19 +616,19 @@ impl Store {
 
     /// Claim unclaimed notifications for a consumer, creating claim records.
     /// Returns the claimed notification rows.
-    #[allow(clippy::type_complexity)]
     pub fn claim_notifications(
         &self,
         session_id: &str,
         consumer_id: &str,
         limit: usize,
-    ) -> SqlResult<Vec<(String, String, String, String, String)>> {
+    ) -> SqlResult<Vec<NotificationRecord>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
         // Select notifications that have never been claimed by this consumer
         let mut stmt = tx.prepare(
-            "SELECT n.id, n.category, n.kind, n.severity, n.payload
+            "SELECT n.id, n.category, n.kind, n.severity, n.payload, n.created_at, \
+                n.title, n.body, n.source_kind, n.source_id
              FROM notifications n
              WHERE n.session_id = ?1
                AND n.id NOT IN (
@@ -582,21 +636,22 @@ impl Store {
                    WHERE consumer_id = ?2
                )
              ORDER BY n.created_at
-             LIMIT ?3"
+             LIMIT ?3",
         )?;
-        let rows: Vec<(String, String, String, String, String)> = stmt
-            .query_map(params![session_id, consumer_id, limit], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-            })?
+        let rows: Vec<NotificationRecord> = stmt
+            .query_map(
+                params![session_id, consumer_id, limit],
+                notification_record_from_row,
+            )?
             .collect::<SqlResult<Vec<_>>>()?;
         stmt.finalize()?;
 
         // Insert claims
-        for (id, _, _, _, _) in &rows {
+        for r in &rows {
             let claim_id = uuid::Uuid::new_v4().to_string();
             tx.execute(
                 "INSERT INTO notification_claims (claim_id, notification_id, consumer_id, claimed_at) VALUES (?1, ?2, ?3, datetime('now'))",
-                params![claim_id, id, consumer_id],
+                params![claim_id, &r.id, consumer_id],
             )?;
         }
 
@@ -620,10 +675,7 @@ impl Store {
 
     /// Recover stale claims older than the given duration (in milliseconds).
     /// Deletes the stale claim records and returns the notification IDs for redelivery.
-    pub fn recover_stale_claims(
-        &self,
-        stale_after_ms: i64,
-    ) -> SqlResult<Vec<String>> {
+    pub fn recover_stale_claims(&self, stale_after_ms: i64) -> SqlResult<Vec<String>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
@@ -631,7 +683,7 @@ impl Store {
         let mut stmt = tx.prepare(
             "SELECT notification_id FROM notification_claims
              WHERE acked_at IS NULL
-               AND claimed_at < strftime('%Y-%m-%d %H:%M:%f', 'now', ?1)"
+               AND claimed_at < strftime('%Y-%m-%d %H:%M:%f', 'now', ?1)",
         )?;
         let ids: Vec<String> = stmt
             .query_map(params![cutoff], |row| row.get(0))?
@@ -653,7 +705,7 @@ impl Store {
     pub fn has_notification_dedupe(&self, session_id: &str, dedupe_key: &str) -> SqlResult<bool> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT 1 FROM notifications WHERE session_id = ?1 AND dedupe_key = ?2 LIMIT 1"
+            "SELECT 1 FROM notifications WHERE session_id = ?1 AND dedupe_key = ?2 LIMIT 1",
         )?;
         let mut rows = stmt.query(params![session_id, dedupe_key])?;
         Ok(rows.next()?.is_some())
@@ -675,7 +727,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn update_task_status(&self, id: &str, status: &str, output: Option<&str>) -> SqlResult<()> {
+    pub fn update_task_status(
+        &self,
+        id: &str,
+        status: &str,
+        output: Option<&str>,
+    ) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         if let Some(out) = output {
             conn.execute(
@@ -701,11 +758,13 @@ impl Store {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn get_task(&self, id: &str) -> SqlResult<Option<(String, String, String, Option<String>)>> {
+    pub fn get_task(
+        &self,
+        id: &str,
+    ) -> SqlResult<Option<(String, String, String, Option<String>)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT session_id, kind, spec, status, output FROM tasks WHERE id = ?1"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT session_id, kind, spec, status, output FROM tasks WHERE id = ?1")?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
             Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?, row.get(4)?)))
@@ -715,13 +774,22 @@ impl Store {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn list_tasks(&self, session_id: &str) -> SqlResult<Vec<(String, String, String, String, Option<String>)>> {
+    pub fn list_tasks(
+        &self,
+        session_id: &str,
+    ) -> SqlResult<Vec<(String, String, String, String, Option<String>)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, kind, spec, status, output FROM tasks WHERE session_id = ?1 ORDER BY created_at"
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })?;
         rows.collect()
     }
@@ -757,6 +825,8 @@ impl Store {
                     UNION \
                     SELECT session_id FROM notifications \
                     WHERE payload LIKE ?1 OR category LIKE ?1 OR kind LIKE ?1 OR severity LIKE ?1 \
+                       OR coalesce(title, '') LIKE ?1 OR coalesce(body, '') LIKE ?1 \
+                       OR coalesce(source_kind, '') LIKE ?1 OR coalesce(source_id, '') LIKE ?1 \
                 ) ORDER BY session_id",
             )?
         };
@@ -764,10 +834,14 @@ impl Store {
         rows.collect()
     }
 
-    pub fn get_notification_offset(&self, consumer_id: &str, session_id: &str) -> SqlResult<Option<String>> {
+    pub fn get_notification_offset(
+        &self,
+        consumer_id: &str,
+        session_id: &str,
+    ) -> SqlResult<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT offset_id FROM notification_offsets WHERE consumer_id = ?1 AND session_id = ?2"
+            "SELECT offset_id FROM notification_offsets WHERE consumer_id = ?1 AND session_id = ?2",
         )?;
         let mut rows = stmt.query(params![consumer_id, session_id])?;
         if let Some(row) = rows.next()? {
@@ -777,7 +851,12 @@ impl Store {
         }
     }
 
-    pub fn set_notification_offset(&self, consumer_id: &str, session_id: &str, offset_id: &str) -> SqlResult<()> {
+    pub fn set_notification_offset(
+        &self,
+        consumer_id: &str,
+        session_id: &str,
+        offset_id: &str,
+    ) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO notification_offsets (consumer_id, session_id, offset_id, updated_at) VALUES (?1, ?2, ?3, datetime('now')) ON CONFLICT(consumer_id) DO UPDATE SET offset_id = excluded.offset_id, updated_at = excluded.updated_at",
@@ -805,7 +884,11 @@ impl Store {
     }
 
     /// Export context entries for a session to JSONL.
-    pub fn export_context_to_jsonl(&self, session_id: &str, writer: &mut dyn std::io::Write) -> anyhow::Result<()> {
+    pub fn export_context_to_jsonl(
+        &self,
+        session_id: &str,
+        writer: &mut dyn std::io::Write,
+    ) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, role, content, metadata, checkpoint_id, token_count, created_at FROM context_entries WHERE session_id = ?1"
@@ -829,10 +912,14 @@ impl Store {
     }
 
     /// Export wire events for a session to JSONL.
-    pub fn export_wire_events_to_jsonl(&self, session_id: &str, writer: &mut dyn std::io::Write) -> anyhow::Result<()> {
+    pub fn export_wire_events_to_jsonl(
+        &self,
+        session_id: &str,
+        writer: &mut dyn std::io::Write,
+    ) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, event_type, payload, created_at FROM wire_events WHERE session_id = ?1"
+            "SELECT id, event_type, payload, created_at FROM wire_events WHERE session_id = ?1",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             Ok(serde_json::json!({
@@ -850,10 +937,14 @@ impl Store {
     }
 
     /// Export tasks for a session to JSONL.
-    pub fn export_tasks_to_jsonl(&self, session_id: &str, writer: &mut dyn std::io::Write) -> anyhow::Result<()> {
+    pub fn export_tasks_to_jsonl(
+        &self,
+        session_id: &str,
+        writer: &mut dyn std::io::Write,
+    ) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, kind, spec, status, output, created_at FROM tasks WHERE session_id = ?1"
+            "SELECT id, kind, spec, status, output, created_at FROM tasks WHERE session_id = ?1",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             Ok(serde_json::json!({
@@ -873,10 +964,15 @@ impl Store {
     }
 
     /// Export notifications for a session to JSONL.
-    pub fn export_notifications_to_jsonl(&self, session_id: &str, writer: &mut dyn std::io::Write) -> anyhow::Result<()> {
+    pub fn export_notifications_to_jsonl(
+        &self,
+        session_id: &str,
+        writer: &mut dyn std::io::Write,
+    ) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, category, kind, severity, payload, created_at FROM notifications WHERE session_id = ?1"
+            "SELECT id, category, kind, severity, payload, created_at, title, body, source_kind, source_id \
+             FROM notifications WHERE session_id = ?1"
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             Ok(serde_json::json!({
@@ -887,6 +983,10 @@ impl Store {
                 "severity": row.get::<_, Option<String>>(3)?,
                 "payload": row.get::<_, Option<String>>(4)?,
                 "created_at": row.get::<_, String>(5)?,
+                "title": row.get::<_, Option<String>>(6)?,
+                "body": row.get::<_, Option<String>>(7)?,
+                "source_kind": row.get::<_, Option<String>>(8)?,
+                "source_id": row.get::<_, Option<String>>(9)?,
             }))
         })?;
         for row in rows {
@@ -896,7 +996,11 @@ impl Store {
     }
 
     /// Export all data for a session to JSONL.
-    pub fn export_session_to_jsonl(&self, session_id: &str, writer: &mut dyn std::io::Write) -> anyhow::Result<()> {
+    pub fn export_session_to_jsonl(
+        &self,
+        session_id: &str,
+        writer: &mut dyn std::io::Write,
+    ) -> anyhow::Result<()> {
         self.export_context_to_jsonl(session_id, writer)?;
         self.export_wire_events_to_jsonl(session_id, writer)?;
         self.export_tasks_to_jsonl(session_id, writer)?;
@@ -934,8 +1038,12 @@ mod tests {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
 
-        store.append_context("s1", "user", Some("hello"), None, None, None).unwrap();
-        store.append_context("s1", "assistant", Some("hi"), None, None, Some(42)).unwrap();
+        store
+            .append_context("s1", "user", Some("hello"), None, None, None)
+            .unwrap();
+        store
+            .append_context("s1", "assistant", Some("hi"), None, None, Some(42))
+            .unwrap();
 
         let rows = store.get_context("s1").unwrap();
         assert_eq!(rows.len(), 2);
@@ -949,8 +1057,12 @@ mod tests {
     fn test_context_clear() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
-        store.append_context("s1", "user", Some("a"), None, None, None).unwrap();
-        store.append_context("s1", "user", Some("b"), None, None, None).unwrap();
+        store
+            .append_context("s1", "user", Some("a"), None, None, None)
+            .unwrap();
+        store
+            .append_context("s1", "user", Some("b"), None, None, None)
+            .unwrap();
 
         let deleted = store.clear_context("s1").unwrap();
         assert_eq!(deleted, 2);
@@ -961,10 +1073,18 @@ mod tests {
     fn test_context_revert_to_checkpoint() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
-        store.append_context("s1", "_checkpoint", None, None, Some(1), None).unwrap();
-        store.append_context("s1", "user", Some("after ck1"), None, None, None).unwrap();
-        store.append_context("s1", "_checkpoint", None, None, Some(2), None).unwrap();
-        store.append_context("s1", "user", Some("after ck2"), None, None, None).unwrap();
+        store
+            .append_context("s1", "_checkpoint", None, None, Some(1), None)
+            .unwrap();
+        store
+            .append_context("s1", "user", Some("after ck1"), None, None, None)
+            .unwrap();
+        store
+            .append_context("s1", "_checkpoint", None, None, Some(2), None)
+            .unwrap();
+        store
+            .append_context("s1", "user", Some("after ck2"), None, None, None)
+            .unwrap();
 
         let deleted = store.revert_context_to_checkpoint("s1", 1).unwrap();
         assert_eq!(deleted, 3); // ck2 + user after ck2 + user after ck1 (all after checkpoint 1)
@@ -996,8 +1116,12 @@ mod tests {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
 
-        store.append_wire_event("s1", "TurnBegin", r#"{"text":"hello"}"#).unwrap();
-        store.append_wire_event("s1", "TextPart", r#"{"text":"world"}"#).unwrap();
+        store
+            .append_wire_event("s1", "TurnBegin", r#"{"text":"hello"}"#)
+            .unwrap();
+        store
+            .append_wire_event("s1", "TextPart", r#"{"text":"world"}"#)
+            .unwrap();
 
         let events = store.get_wire_events("s1").unwrap();
         assert_eq!(events.len(), 2);
@@ -1036,13 +1160,41 @@ mod tests {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
 
-        store.append_notification("n1", "s1", "task", "done", "info", r#"{"x":1}"#, None).unwrap();
-        store.append_notification("n2", "s1", "agent", "error", "warn", r#"{"y":2}"#, None).unwrap();
+        store
+            .append_notification(
+                "n1",
+                "s1",
+                "task",
+                "done",
+                "info",
+                r#"{"x":1}"#,
+                None,
+                "",
+                "",
+                "",
+                "",
+            )
+            .unwrap();
+        store
+            .append_notification(
+                "n2",
+                "s1",
+                "agent",
+                "error",
+                "warn",
+                r#"{"y":2}"#,
+                None,
+                "",
+                "",
+                "",
+                "",
+            )
+            .unwrap();
 
         let notifs = store.get_notifications("s1").unwrap();
         assert_eq!(notifs.len(), 2);
-        assert_eq!(notifs[0].1, "task");
-        assert_eq!(notifs[1].3, "warn");
+        assert_eq!(notifs[0].category, "task");
+        assert_eq!(notifs[1].severity, "warn");
     }
 
     #[test]
@@ -1050,13 +1202,17 @@ mod tests {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
 
-        store.create_task("t1", "s1", "bash", r#"{"cmd":"echo hi"}"#, "pending").unwrap();
+        store
+            .create_task("t1", "s1", "bash", r#"{"cmd":"echo hi"}"#, "pending")
+            .unwrap();
         let t = store.get_task("t1").unwrap().unwrap();
         assert_eq!(t.0, "s1");
         assert_eq!(t.1, "bash");
         assert_eq!(t.3, None); // output is initially None
 
-        store.update_task_status("t1", "running", Some("output")).unwrap();
+        store
+            .update_task_status("t1", "running", Some("output"))
+            .unwrap();
         let updated = store.get_task("t1").unwrap().unwrap();
         assert_eq!(updated.3.as_deref(), Some("output"));
 
@@ -1074,8 +1230,12 @@ mod tests {
         let store = test_store();
         store.create_session("s1", "/tmp/a").unwrap();
         store.create_session("s2", "/tmp/b").unwrap();
-        store.append_context("s1", "user", Some("hello world"), None, None, None).unwrap();
-        store.append_context("s2", "user", Some("goodbye"), None, None, None).unwrap();
+        store
+            .append_context("s1", "user", Some("hello world"), None, None, None)
+            .unwrap();
+        store
+            .append_context("s2", "user", Some("goodbye"), None, None, None)
+            .unwrap();
 
         let results = store.search_sessions("hello").unwrap();
         assert_eq!(results.len(), 1);
@@ -1102,6 +1262,10 @@ mod tests {
                 "info",
                 r#"{"msg":"hello notify"}"#,
                 None,
+                "",
+                "",
+                "",
+                "",
             )
             .unwrap();
         let notif_hits = store.search_sessions("hello notify").unwrap();
@@ -1122,7 +1286,19 @@ mod tests {
             .append_wire_event("s1", "TextPart", r#"{"text":"wire-b"}"#)
             .unwrap();
         store
-            .append_notification("n1", "s1", "c", "k", "info", r#"{"x":1}"#, None)
+            .append_notification(
+                "n1",
+                "s1",
+                "c",
+                "k",
+                "info",
+                r#"{"x":1}"#,
+                None,
+                "",
+                "",
+                "",
+                "",
+            )
             .unwrap();
         store
             .create_task("t1", "s1", "bash", r#"{"cmd":"echo"}"#, "running")
@@ -1146,9 +1322,7 @@ mod tests {
         let first_notif = streams.iter().position(|s| *s == "notification").unwrap();
         let first_task = streams.iter().position(|s| *s == "task").unwrap();
         let first_state = streams.iter().position(|s| *s == "state").unwrap();
-        assert!(
-            first_wire < first_notif && first_notif < first_task && first_task < first_state
-        );
+        assert!(first_wire < first_notif && first_notif < first_task && first_task < first_state);
     }
 
     #[test]
@@ -1176,7 +1350,19 @@ mod tests {
         store.create_session("s1", "/tmp").unwrap();
         store.set_state("s1", r#"{"secret":"xyzzy"}"#).unwrap();
         store
-            .append_notification("n1", "s1", "x", "y", "info", r#"{"z":1}"#, None)
+            .append_notification(
+                "n1",
+                "s1",
+                "x",
+                "y",
+                "info",
+                r#"{"z":1}"#,
+                None,
+                "",
+                "",
+                "",
+                "",
+            )
             .unwrap();
 
         let short = store.search_sessions("xy").unwrap();
@@ -1188,7 +1374,6 @@ mod tests {
         let long = store.search_sessions("xyz").unwrap();
         assert!(long.contains(&"s1".to_string()));
     }
-
 
     #[test]
     fn test_export_sessions_to_jsonl() {
@@ -1208,7 +1393,9 @@ mod tests {
     fn test_export_context_to_jsonl() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
-        store.append_context("s1", "user", Some("hello"), None, None, None).unwrap();
+        store
+            .append_context("s1", "user", Some("hello"), None, None, None)
+            .unwrap();
 
         let mut buf = Vec::new();
         store.export_context_to_jsonl("s1", &mut buf).unwrap();
@@ -1221,7 +1408,9 @@ mod tests {
     fn test_export_wire_events_to_jsonl() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
-        store.append_wire_event("s1", "TurnBegin", r#"{"text":"hi"}"#).unwrap();
+        store
+            .append_wire_event("s1", "TurnBegin", r#"{"text":"hi"}"#)
+            .unwrap();
 
         let mut buf = Vec::new();
         store.export_wire_events_to_jsonl("s1", &mut buf).unwrap();
@@ -1234,7 +1423,9 @@ mod tests {
     fn test_export_tasks_to_jsonl() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
-        store.create_task("t1", "s1", "bash", r#"{"cmd":"echo"}"#, "done").unwrap();
+        store
+            .create_task("t1", "s1", "bash", r#"{"cmd":"echo"}"#, "done")
+            .unwrap();
 
         let mut buf = Vec::new();
         store.export_tasks_to_jsonl("s1", &mut buf).unwrap();
@@ -1247,7 +1438,11 @@ mod tests {
     fn test_export_notifications_to_jsonl() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
-        store.append_notification("n1", "s1", "task", "done", "info", r#"{}"#, None).unwrap();
+        store
+            .append_notification(
+                "n1", "s1", "task", "done", "info", r#"{}"#, None, "", "", "", "",
+            )
+            .unwrap();
 
         let mut buf = Vec::new();
         store.export_notifications_to_jsonl("s1", &mut buf).unwrap();
@@ -1260,7 +1455,9 @@ mod tests {
     fn test_export_session_to_jsonl() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
-        store.append_context("s1", "user", Some("hello"), None, None, None).unwrap();
+        store
+            .append_context("s1", "user", Some("hello"), None, None, None)
+            .unwrap();
         store.append_wire_event("s1", "TurnBegin", r#"{}"#).unwrap();
 
         let mut buf = Vec::new();
@@ -1273,15 +1470,24 @@ mod tests {
     #[test]
     fn test_notification_offset_roundtrip() {
         let store = test_store();
-        store.set_notification_offset("consumer-a", "s1", "off-1").unwrap();
+        store
+            .set_notification_offset("consumer-a", "s1", "off-1")
+            .unwrap();
         let off = store.get_notification_offset("consumer-a", "s1").unwrap();
         assert_eq!(off.as_deref(), Some("off-1"));
 
-        store.set_notification_offset("consumer-a", "s1", "off-2").unwrap();
+        store
+            .set_notification_offset("consumer-a", "s1", "off-2")
+            .unwrap();
         let updated = store.get_notification_offset("consumer-a", "s1").unwrap();
         assert_eq!(updated.as_deref(), Some("off-2"));
 
-        assert!(store.get_notification_offset("missing", "s1").unwrap().is_none());
+        assert!(
+            store
+                .get_notification_offset("missing", "s1")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1289,18 +1495,22 @@ mod tests {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
         store
-            .append_notification("n1", "s1", "a", "k1", "info", r#"{}"#, None)
+            .append_notification("n1", "s1", "a", "k1", "info", r#"{}"#, None, "", "", "", "")
             .unwrap();
         store
-            .append_notification("n2", "s1", "a", "k2", "info", r#"{}"#, None)
+            .append_notification("n2", "s1", "a", "k2", "info", r#"{}"#, None, "", "", "", "")
             .unwrap();
         let head = store.list_notifications_after("s1", None, 10).unwrap();
         assert_eq!(head.len(), 2);
-        assert_eq!(head[0].0, "n1");
-        let tail = store.list_notifications_after("s1", Some("n1"), 10).unwrap();
+        assert_eq!(head[0].id, "n1");
+        let tail = store
+            .list_notifications_after("s1", Some("n1"), 10)
+            .unwrap();
         assert_eq!(tail.len(), 1);
-        assert_eq!(tail[0].0, "n2");
-        let empty = store.list_notifications_after("s1", Some("n2"), 10).unwrap();
+        assert_eq!(tail[0].id, "n2");
+        let empty = store
+            .list_notifications_after("s1", Some("n2"), 10)
+            .unwrap();
         assert!(empty.is_empty());
     }
 }

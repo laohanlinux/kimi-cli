@@ -23,7 +23,12 @@ impl ForegroundSubagentRunner {
         let agent_id = uuid::Uuid::new_v4().to_string();
         let store = SubagentStore::new(parent_runtime.store.clone());
         store
-            .create(&agent_id, &parent_runtime.session.id, &agent_spec.system_prompt, &prompt)
+            .create(
+                &agent_id,
+                &parent_runtime.session.id,
+                &agent_spec.system_prompt,
+                &prompt,
+            )
             .await?;
 
         let hub = RootWireHub::new();
@@ -48,7 +53,7 @@ impl ForegroundSubagentRunner {
         }
 
         let context = Arc::new(Mutex::new(
-            Context::load(&subagent_runtime.store, &subagent_runtime.session.id).await?
+            Context::load(&subagent_runtime.store, &subagent_runtime.session.id).await?,
         ));
         let agent = Agent {
             spec: agent_spec.clone(),
@@ -184,7 +189,14 @@ mod tests {
             capabilities: vec![],
             ..Default::default()
         };
-        let result = ForegroundSubagentRunner::run(&rt, &parent_hub, "tc-1".to_string(), spec, "hello".to_string()).await;
+        let result = ForegroundSubagentRunner::run(
+            &rt,
+            &parent_hub,
+            "tc-1".to_string(),
+            spec,
+            "hello".to_string(),
+        )
+        .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("completed"));
     }
@@ -203,9 +215,15 @@ mod tests {
             ..Default::default()
         };
         let sid = rt.session.id.clone();
-        ForegroundSubagentRunner::run(&rt, &parent_hub, "tc-persist".to_string(), spec, "hi".to_string())
-            .await
-            .unwrap();
+        ForegroundSubagentRunner::run(
+            &rt,
+            &parent_hub,
+            "tc-persist".to_string(),
+            spec,
+            "hi".to_string(),
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
         let rows = rt.store.get_wire_events(&sid).unwrap();
         assert!(
@@ -230,9 +248,15 @@ mod tests {
             ..Default::default()
         };
         let sid = rt.session.id.clone();
-        ForegroundSubagentRunner::run(&rt, &parent_hub, "tc-env-src".to_string(), spec, "persist-env".to_string())
-            .await
-            .unwrap();
+        ForegroundSubagentRunner::run(
+            &rt,
+            &parent_hub,
+            "tc-env-src".to_string(),
+            spec,
+            "persist-env".to_string(),
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let rows = rt.store.get_wire_events(&sid).unwrap();
         let mut saw_subagent_envelope = false;
@@ -262,7 +286,14 @@ mod tests {
             capabilities: vec![],
             ..Default::default()
         };
-        let result = ForegroundSubagentRunner::run(&rt, &parent_hub, "tc-2".to_string(), spec, "".to_string()).await;
+        let result = ForegroundSubagentRunner::run(
+            &rt,
+            &parent_hub,
+            "tc-2".to_string(),
+            spec,
+            "".to_string(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -277,7 +308,14 @@ mod tests {
             capabilities: vec![],
             ..Default::default()
         };
-        let result = ForegroundSubagentRunner::run(&rt, &parent_hub, "tc-3".to_string(), spec, "find docs".to_string()).await;
+        let result = ForegroundSubagentRunner::run(
+            &rt,
+            &parent_hub,
+            "tc-3".to_string(),
+            spec,
+            "find docs".to_string(),
+        )
+        .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("completed"));
     }
@@ -296,9 +334,15 @@ mod tests {
             capabilities: vec![],
             ..Default::default()
         };
-        ForegroundSubagentRunner::run(&rt, &parent_hub, "tc-src-on".to_string(), spec, "hello".to_string())
-            .await
-            .unwrap();
+        ForegroundSubagentRunner::run(
+            &rt,
+            &parent_hub,
+            "tc-src-on".to_string(),
+            spec,
+            "hello".to_string(),
+        )
+        .await
+        .unwrap();
         let mut saw_subagent = false;
         while let Ok(env) = rx.try_recv() {
             if env.source.source_type == SourceType::Subagent {
@@ -306,7 +350,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_subagent, "expected at least one Subagent-stamped envelope");
+        assert!(
+            saw_subagent,
+            "expected at least one Subagent-stamped envelope"
+        );
     }
 
     #[tokio::test]
@@ -321,9 +368,15 @@ mod tests {
             capabilities: vec![],
             ..Default::default()
         };
-        ForegroundSubagentRunner::run(&rt, &parent_hub, "tc-src-off".to_string(), spec, "hello".to_string())
-            .await
-            .unwrap();
+        ForegroundSubagentRunner::run(
+            &rt,
+            &parent_hub,
+            "tc-src-off".to_string(),
+            spec,
+            "hello".to_string(),
+        )
+        .await
+        .unwrap();
         let mut n = 0usize;
         while let Ok(env) = rx.try_recv() {
             n += 1;

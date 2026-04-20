@@ -13,13 +13,13 @@ use crate::context::Context;
 use crate::feature_flags::{ExperimentalFeature, FeatureFlags};
 use crate::hooks::HookStage;
 use crate::llm::{self, ChatProvider};
-use crate::message::{merge_adjacent_user_messages, ContentPart, Message, UserMessage};
-use crate::turn_input::TurnInput;
+use crate::message::{ContentPart, Message, UserMessage, merge_adjacent_user_messages};
 use crate::notification::NotificationManager;
 use crate::runtime::Runtime;
 use crate::soul::BackToTheFuture;
 use crate::token::ContextToken;
 use crate::tools::ToolContext;
+use crate::turn_input::TurnInput;
 use crate::wire::{RootWireHub, WireEvent};
 
 #[derive(Debug)]
@@ -32,13 +32,21 @@ pub(crate) async fn deliver_wire_offset_tail(
     notifications: &NotificationManager,
     hub: &RootWireHub,
 ) -> anyhow::Result<()> {
-    let wire_tail = notifications.read_since_persisted_offset("wire", 50).await?;
+    let wire_tail = notifications
+        .read_since_persisted_offset("wire", 50)
+        .await?;
     let mut last_id: Option<String> = None;
     for notif in &wire_tail {
         hub.broadcast(WireEvent::Notification {
+            id: notif.dedupe_key.clone().unwrap_or_default(),
             category: notif.category.clone(),
             kind: notif.kind.clone(),
+            source_kind: notif.source_kind.clone(),
+            source_id: notif.source_id.clone(),
+            title: notif.title.clone(),
+            body: notif.body.clone(),
             severity: notif.severity.clone(),
+            created_at: notif.created_at.unwrap_or(0.0),
             payload: notif.payload.clone(),
         });
         last_id = notif.dedupe_key.clone();
@@ -50,7 +58,10 @@ pub(crate) async fn deliver_wire_offset_tail(
 }
 
 /// §7.2: when `FunctionTools` is enabled, annotate each tool JSON schema for providers that understand function-style tools.
-pub(crate) fn apply_function_tool_schema_tags(features: &FeatureFlags, tools: &mut [serde_json::Value]) {
+pub(crate) fn apply_function_tool_schema_tags(
+    features: &FeatureFlags,
+    tools: &mut [serde_json::Value],
+) {
     if !features.is_enabled(ExperimentalFeature::FunctionTools) {
         return;
     }
@@ -88,7 +99,9 @@ pub struct ReActOrchestrator;
 
 #[async_trait]
 impl TurnOrchestrator for ReActOrchestrator {
-    fn name(&self) -> &'static str { "react" }
+    fn name(&self) -> &'static str {
+        "react"
+    }
 
     async fn execute_turn(
         &self,
@@ -106,7 +119,8 @@ impl TurnOrchestrator for ReActOrchestrator {
         ctx.append(user_msg).await?;
         drop(ctx);
 
-        let stop_reason = Self::_agent_loop(agent, context, llm, runtime, hub, checkpoint_id, token).await?;
+        let stop_reason =
+            Self::_agent_loop(agent, context, llm, runtime, hub, checkpoint_id, token).await?;
         Ok(TurnResult { stop_reason })
     }
 }
@@ -121,11 +135,26 @@ impl ReActOrchestrator {
         checkpoint_id: u64,
         token: ContextToken,
     ) -> anyhow::Result<String> {
-        let max_steps = runtime.config.read().await.max_steps_per_turn.unwrap_or(100);
+        let max_steps = runtime
+            .config
+            .read()
+            .await
+            .max_steps_per_turn
+            .unwrap_or(100);
         for step in 1..=max_steps {
             hub.broadcast(WireEvent::StepBegin { n: step });
             let step_token = token.child_step(format!("{}", step));
-            match Self::_step(agent, context.clone(), llm.clone(), runtime, hub, checkpoint_id, step_token).await {
+            match Self::_step(
+                agent,
+                context.clone(),
+                llm.clone(),
+                runtime,
+                hub,
+                checkpoint_id,
+                step_token,
+            )
+            .await
+            {
                 Ok(has_tool_calls) => {
                     if !has_tool_calls {
                         return Ok("no_tool_calls".to_string());
@@ -196,10 +225,11 @@ impl ReActOrchestrator {
         if !notifications.is_empty() {
             let mut ctx = context.lock().await;
             for notif in &notifications {
-                let text = format!(
-                    "[Notification: {} {}] {}",
-                    notif.category, notif.severity, notif.kind
-                );
+                let text = crate::notification::llm::build_notification_message_for_llm(
+                    notif,
+                    Some(&runtime.bg_manager),
+                )
+                .await;
                 ctx.append(Message::User(UserMessage::text(text))).await?;
             }
             drop(ctx);
@@ -233,7 +263,10 @@ impl ReActOrchestrator {
                     _ => None,
                 })
                 .unwrap_or_default();
-            let h = if runtime.features.is_enabled(ExperimentalFeature::MemoryHierarchy) {
+            let h = if runtime
+                .features
+                .is_enabled(ExperimentalFeature::MemoryHierarchy)
+            {
                 ctx.history_with_recall(&recall_query, 5)
             } else {
                 ctx.history()
@@ -251,10 +284,9 @@ impl ReActOrchestrator {
             let system_prompt = system_prompt.clone();
             let history = history.clone();
             let tools = tools.clone();
-            async move {
-                llm.generate(system_prompt, history, tools).await
-            }
-        }).await?;
+            async move { llm.generate(system_prompt, history, tools).await }
+        })
+        .await?;
         let pull_backpressure = runtime
             .features
             .is_enabled(ExperimentalFeature::PullGeneration);
@@ -290,11 +322,10 @@ impl ReActOrchestrator {
                     "args": &args,
                     "tool_call_id": &tc.id,
                 });
-                let validate_result = runtime.hooks.run(
-                    HookStage::PreValidate,
-                    "tool_call",
-                    &validate_payload,
-                ).await?;
+                let validate_result = runtime
+                    .hooks
+                    .run(HookStage::PreValidate, "tool_call", &validate_payload)
+                    .await?;
                 if let crate::hooks::EffectDecision::Block { reason } = validate_result.decision {
                     hub.broadcast(WireEvent::ToolResult {
                         tool_call_id: tc.id.clone(),
@@ -307,10 +338,13 @@ impl ReActOrchestrator {
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.function.name.clone(),
                         status: crate::message::ToolStatus::Failed,
-                        content: vec![crate::message::ContentBlock::Text { text: format!("Blocked by hook: {}", reason) }],
+                        content: vec![crate::message::ContentBlock::Text {
+                            text: format!("Blocked by hook: {}", reason),
+                        }],
                         metrics: None,
                         elapsed_ms: None,
-                    })).await?;
+                    }))
+                    .await?;
                     continue;
                 }
 
@@ -359,14 +393,17 @@ impl ReActOrchestrator {
                     token: token.child_tool_call(tc.id.clone()),
                 };
                 let start = std::time::Instant::now();
-                let tool_result = toolset.handle(&tc.function.name, args.clone(), &tool_ctx).await;
+                let tool_result = toolset
+                    .handle(&tc.function.name, args.clone(), &tool_ctx)
+                    .await;
                 let elapsed = start.elapsed().as_millis() as u64;
                 drop(toolset);
 
                 match &tool_result {
                     Ok(output) => {
                         // Wire display: text summary for UI compatibility
-                        let display_text = crate::message::content_to_string(&output.result.content);
+                        let display_text =
+                            crate::message::content_to_string(&output.result.content);
                         hub.broadcast(WireEvent::ToolResult {
                             tool_call_id: tc.id.clone(),
                             output: display_text,
@@ -382,7 +419,8 @@ impl ReActOrchestrator {
                             content: output.result.content.clone(),
                             metrics: Some(output.metrics.clone()),
                             elapsed_ms: Some(elapsed),
-                        })).await?;
+                        }))
+                        .await?;
 
                         // Post-execute hook
                         let post_payload = serde_json::json!({
@@ -391,7 +429,10 @@ impl ReActOrchestrator {
                             "tool_call_id": &tc.id,
                             "result": "success",
                         });
-                        let _ = runtime.hooks.run(HookStage::PostExecute, "tool_call", &post_payload).await?;
+                        let _ = runtime
+                            .hooks
+                            .run(HookStage::PostExecute, "tool_call", &post_payload)
+                            .await?;
                     }
                     Err(e) => {
                         hub.broadcast(WireEvent::ToolResult {
@@ -405,10 +446,13 @@ impl ReActOrchestrator {
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.function.name.clone(),
                             status: crate::message::ToolStatus::Failed,
-                            content: vec![crate::message::ContentBlock::Text { text: e.to_string() }],
+                            content: vec![crate::message::ContentBlock::Text {
+                                text: e.to_string(),
+                            }],
                             metrics: None,
                             elapsed_ms: Some(elapsed),
-                        })).await?;
+                        }))
+                        .await?;
 
                         // Post-execute failure hook
                         let post_payload = serde_json::json!({
@@ -418,7 +462,10 @@ impl ReActOrchestrator {
                             "result": "error",
                             "error": e.to_string(),
                         });
-                        let _ = runtime.hooks.run(HookStage::PostExecuteFailure, "tool_call", &post_payload).await?;
+                        let _ = runtime
+                            .hooks
+                            .run(HookStage::PostExecuteFailure, "tool_call", &post_payload)
+                            .await?;
                     }
                 }
 
@@ -429,7 +476,10 @@ impl ReActOrchestrator {
                     "tool_call_id": &tc.id,
                     "result": if tool_result.is_ok() { "success" } else { "error" },
                 });
-                let _ = runtime.hooks.run(HookStage::Audit, "tool_call", &audit_payload).await?;
+                let _ = runtime
+                    .hooks
+                    .run(HookStage::Audit, "tool_call", &audit_payload)
+                    .await?;
             }
         }
 
@@ -461,7 +511,11 @@ impl ReActOrchestrator {
 
         // D-Mail check
         if let Some((target_cp, messages)) = runtime.denwa_renji.claim().await {
-            let effective_cp = if target_cp == 0 { checkpoint_id } else { target_cp };
+            let effective_cp = if target_cp == 0 {
+                checkpoint_id
+            } else {
+                target_cp
+            };
             return Err(anyhow::Error::from(BackToTheFuture {
                 checkpoint_id: effective_cp,
                 messages,
@@ -477,7 +531,9 @@ pub struct PlanModeOrchestrator;
 
 #[async_trait]
 impl TurnOrchestrator for PlanModeOrchestrator {
-    fn name(&self) -> &'static str { "plan" }
+    fn name(&self) -> &'static str {
+        "plan"
+    }
 
     async fn execute_turn(
         &self,
@@ -494,7 +550,10 @@ impl TurnOrchestrator for PlanModeOrchestrator {
         let user_msg = Message::User(UserMessage::from_parts(turn.parts.clone()));
         ctx.append(user_msg).await?;
         let history = merge_adjacent_user_messages(ctx.history());
-        let system_prompt = Some(format!("{}\n\n[PLAN MODE] You are in read-only research mode. Do not use tools. Think step by step and present a plan.", agent.system_prompt));
+        let system_prompt = Some(format!(
+            "{}\n\n[PLAN MODE] You are in read-only research mode. Do not use tools. Think step by step and present a plan.",
+            agent.system_prompt
+        ));
         drop(ctx);
 
         let _ = deliver_wire_offset_tail(&runtime.notifications, hub).await;
@@ -502,6 +561,7 @@ impl TurnOrchestrator for PlanModeOrchestrator {
         hub.broadcast(WireEvent::StepBegin { n: 1 });
         hub.broadcast(WireEvent::PlanDisplay {
             content: "Plan mode active. Analyzing without tools...".to_string(),
+            file_path: String::new(),
         });
 
         let mut generation = llm.generate(system_prompt, history, vec![]).await?;
@@ -576,11 +636,7 @@ Respond with exactly one word: STOP or CONTINUE.",
             iteration, stop_reason
         );
 
-        let mut generation = llm.generate(
-            Some(decision_prompt),
-            vec![],
-            vec![],
-        ).await?;
+        let mut generation = llm.generate(Some(decision_prompt), vec![], vec![]).await?;
 
         let mut response = String::new();
         while let Some(chunk) = generation.next_chunk().await {
@@ -593,7 +649,10 @@ Respond with exactly one word: STOP or CONTINUE.",
         let stop = trimmed.contains("STOP");
 
         hub.broadcast(WireEvent::TextPart {
-            text: format!("[Ralph decision: {}]\n", if stop { "STOP" } else { "CONTINUE" }),
+            text: format!(
+                "[Ralph decision: {}]\n",
+                if stop { "STOP" } else { "CONTINUE" }
+            ),
         });
 
         Ok(stop)
@@ -602,7 +661,9 @@ Respond with exactly one word: STOP or CONTINUE.",
 
 #[async_trait]
 impl TurnOrchestrator for RalphOrchestrator {
-    fn name(&self) -> &'static str { "ralph" }
+    fn name(&self) -> &'static str {
+        "ralph"
+    }
 
     async fn execute_turn(
         &self,
@@ -663,7 +724,10 @@ impl TurnOrchestrator for RalphOrchestrator {
             }
 
             // LLM decision gate for other stop reasons
-            match self.should_stop(llm.clone(), &turn_result.stop_reason, iteration, hub).await {
+            match self
+                .should_stop(llm.clone(), &turn_result.stop_reason, iteration, hub)
+                .await
+            {
                 Ok(true) => {
                     return Ok(TurnResult {
                         stop_reason: format!("ralph_decided_stop:{}:", turn_result.stop_reason),
@@ -709,7 +773,12 @@ mod tests {
         let mut flags = FeatureFlags::default();
         let mut tools = vec![serde_json::json!({"type": "object", "properties": {}})];
         apply_function_tool_schema_tags(&flags, &mut tools);
-        assert!(!tools[0].as_object().unwrap().contains_key("x-rki-tool-contract"));
+        assert!(
+            !tools[0]
+                .as_object()
+                .unwrap()
+                .contains_key("x-rki-tool-contract")
+        );
 
         flags.enable(ExperimentalFeature::FunctionTools);
         apply_function_tool_schema_tags(&flags, &mut tools);
@@ -799,10 +868,17 @@ mod tests {
         let hub = RootWireHub::new();
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
-        orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("any follow-up"), &hub, token)
-            .await
-            .unwrap();
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("any follow-up"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
 
         let hist = captured.lock().await;
         let joined: String = hist.iter().map(|m| format!("{m:?}")).collect();
@@ -840,10 +916,17 @@ mod tests {
         let hub = RootWireHub::new();
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
-        orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("any follow-up"), &hub, token)
-            .await
-            .unwrap();
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("any follow-up"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
 
         let hist = captured.lock().await;
         let joined: String = hist.iter().map(|m| format!("{m:?}")).collect();
@@ -877,7 +960,15 @@ mod tests {
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         let result = orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -889,9 +980,15 @@ mod tests {
         while let Ok(envelope) = rx.try_recv() {
             events.push(envelope.event);
         }
-        let has_step = events.iter().any(|e| matches!(e, WireEvent::StepBegin { .. }));
-        let has_text = events.iter().any(|e| matches!(e, WireEvent::TextPart { .. }));
-        let has_status = events.iter().any(|e| matches!(e, WireEvent::StatusUpdate { .. }));
+        let has_step = events
+            .iter()
+            .any(|e| matches!(e, WireEvent::StepBegin { .. }));
+        let has_text = events
+            .iter()
+            .any(|e| matches!(e, WireEvent::TextPart { .. }));
+        let has_status = events
+            .iter()
+            .any(|e| matches!(e, WireEvent::StatusUpdate { .. }));
         assert!(has_step, "Expected StepBegin");
         assert!(has_text, "Expected TextPart");
         assert!(has_status, "Expected StatusUpdate");
@@ -933,9 +1030,7 @@ mod tests {
                     None,
                 )))
             } else {
-                EchoProvider
-                    .generate(system_prompt, history, tools)
-                    .await
+                EchoProvider.generate(system_prompt, history, tools).await
             }
         }
     }
@@ -968,10 +1063,17 @@ mod tests {
 
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
-        orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("use plan tool"), &hub, token)
-            .await
-            .unwrap();
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("use plan tool"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
 
         let mut saw_plan_true = false;
         while let Ok(envelope) = rx.try_recv() {
@@ -1001,7 +1103,10 @@ mod tests {
                 kind: "wire_tail_ping".to_string(),
                 severity: "info".to_string(),
                 payload: serde_json::json!({"n": 1}),
+                title: "tail-title".to_string(),
+                source_kind: "orchestrator".to_string(),
                 dedupe_key: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1023,19 +1128,38 @@ mod tests {
         let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
-        orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
-            .await
-            .unwrap();
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
 
         let mut saw = false;
         while let Ok(envelope) = rx.try_recv() {
-            if matches!(
-                &envelope.event,
-                WireEvent::Notification { kind, .. } if kind == "wire_tail_ping"
-            ) {
-                saw = true;
-                break;
+            if let WireEvent::Notification {
+                kind,
+                created_at,
+                title,
+                source_kind,
+                ..
+            } = &envelope.event
+            {
+                if kind == "wire_tail_ping" {
+                    assert!(
+                        *created_at > 0.0,
+                        "notification created_at should come from SQLite row"
+                    );
+                    assert_eq!(title, "tail-title");
+                    assert_eq!(source_kind, "orchestrator");
+                    saw = true;
+                    break;
+                }
             }
         }
         assert!(
@@ -1068,7 +1192,15 @@ mod tests {
         let orch = PlanModeOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         let result = orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("plan something"), &hub, token)
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("plan something"),
+                &hub,
+                token,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1080,7 +1212,9 @@ mod tests {
         while let Ok(envelope) = rx.try_recv() {
             events.push(envelope.event);
         }
-        let has_plan_display = events.iter().any(|e| matches!(e, WireEvent::PlanDisplay { .. }));
+        let has_plan_display = events
+            .iter()
+            .any(|e| matches!(e, WireEvent::PlanDisplay { .. }));
         assert!(has_plan_display, "Expected PlanDisplay in plan mode");
     }
 
@@ -1097,6 +1231,7 @@ mod tests {
                 severity: "info".to_string(),
                 payload: serde_json::json!({}),
                 dedupe_key: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1118,19 +1253,29 @@ mod tests {
         let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
         let orch = PlanModeOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
-        orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("plan ping"), &hub, token)
-            .await
-            .unwrap();
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("plan ping"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
 
         let mut saw = false;
         while let Ok(envelope) = rx.try_recv() {
-            if matches!(
-                &envelope.event,
-                WireEvent::Notification { kind, .. } if kind == "plan_wire_ping"
-            ) {
-                saw = true;
-                break;
+            if let WireEvent::Notification {
+                kind, created_at, ..
+            } = &envelope.event
+            {
+                if kind == "plan_wire_ping" {
+                    assert!(*created_at > 0.0);
+                    saw = true;
+                    break;
+                }
             }
         }
         assert!(
@@ -1142,7 +1287,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_orchestrator_swap() {
         let runtime = test_runtime();
-        
+
         // Default should be react
         let orch = runtime.get_orchestrator().await;
         assert_eq!(orch.name(), "react");
@@ -1180,7 +1325,7 @@ mod tests {
         // Scripted provider: returns STOP when it sees the RALPH DECISION prompt
         let llm: Arc<dyn ChatProvider> = Arc::new(
             ScriptedProvider::new("Hello from echo provider.")
-                .with_response("[RALPH DECISION]", "STOP")
+                .with_response("[RALPH DECISION]", "STOP"),
         );
         let hub = RootWireHub::new();
         let mut rx = hub.subscribe();
@@ -1188,22 +1333,34 @@ mod tests {
         let orch = RalphOrchestrator::new(5);
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         let result = orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
             .await;
 
         assert!(result.is_ok());
         let turn_result = result.unwrap();
-        assert!(turn_result.stop_reason.contains("ralph_decided_stop") || turn_result.stop_reason == "ralph_complete",
-            "Expected ralph stop, got: {}", turn_result.stop_reason);
+        assert!(
+            turn_result.stop_reason.contains("ralph_decided_stop")
+                || turn_result.stop_reason == "ralph_complete",
+            "Expected ralph stop, got: {}",
+            turn_result.stop_reason
+        );
 
         // Verify hub events show Ralph iterations
         let mut events = Vec::new();
         while let Ok(envelope) = rx.try_recv() {
             events.push(envelope.event);
         }
-        let has_ralph_start = events.iter().any(|e| {
-            matches!(e, WireEvent::TextPart { text } if text.contains("Ralph mode"))
-        });
+        let has_ralph_start = events
+            .iter()
+            .any(|e| matches!(e, WireEvent::TextPart { text } if text.contains("Ralph mode")));
         assert!(has_ralph_start, "Expected Ralph mode start message");
     }
 
@@ -1232,13 +1389,24 @@ mod tests {
         let orch = RalphOrchestrator::new(1);
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         let result = orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
             .await;
 
         assert!(result.is_ok());
         let turn_result = result.unwrap();
-        assert!(turn_result.stop_reason.contains("ralph_max_iterations"),
-            "Expected max iterations stop, got: {}", turn_result.stop_reason);
+        assert!(
+            turn_result.stop_reason.contains("ralph_max_iterations"),
+            "Expected max iterations stop, got: {}",
+            turn_result.stop_reason
+        );
     }
 
     #[tokio::test]
@@ -1265,7 +1433,15 @@ mod tests {
         let orch = RalphOrchestrator::new(5);
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         let result = orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1300,7 +1476,15 @@ mod tests {
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         let result = orch
-            .execute_turn(&agent, context.clone(), llm, &runtime, TurnInput::text("hello"), &hub, token)
+            .execute_turn(
+                &agent,
+                context.clone(),
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1381,9 +1565,7 @@ mod tests {
             .iter()
             .filter_map(|e| {
                 if let WireEvent::ToolResult {
-                    output,
-                    is_error,
-                    ..
+                    output, is_error, ..
                 } = e
                 {
                     Some((*is_error, output.clone()))
@@ -1425,10 +1607,17 @@ mod tests {
         let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider);
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
-        orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
-            .await
-            .unwrap();
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
 
         let mut events = Vec::new();
         while let Ok(envelope) = rx.try_recv() {
@@ -1436,7 +1625,9 @@ mod tests {
         }
         let tool_results = collect_tool_results(&events);
         assert!(
-            tool_results.iter().any(|(err, o)| *err && o.contains("Blocked by hook")),
+            tool_results
+                .iter()
+                .any(|(err, o)| *err && o.contains("Blocked by hook")),
             "expected blocked tool result, got {:?}",
             tool_results
         );
@@ -1471,10 +1662,17 @@ mod tests {
         let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider);
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
-        orch
-            .execute_turn(&agent, context, llm, &runtime, TurnInput::text("hello"), &hub, token)
-            .await
-            .unwrap();
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
 
         let mut events = Vec::new();
         while let Ok(envelope) = rx.try_recv() {
@@ -1482,7 +1680,9 @@ mod tests {
         }
         let tool_results = collect_tool_results(&events);
         assert!(
-            tool_results.iter().any(|(err, o)| !err && !o.contains("Blocked by hook")),
+            tool_results
+                .iter()
+                .any(|(err, o)| !err && !o.contains("Blocked by hook")),
             "expected successful tool run ignoring PreExecute block, got {:?}",
             tool_results
         );
@@ -1491,7 +1691,7 @@ mod tests {
     #[tokio::test]
     async fn test_config_hot_reload() {
         let runtime = test_runtime();
-        
+
         // Verify initial config
         {
             let cfg = runtime.config.read().await;
@@ -1502,14 +1702,18 @@ mod tests {
         // Create a temp config file with different values
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.toml");
-        std::fs::write(&config_path, r#"
+        std::fs::write(
+            &config_path,
+            r#"
 [models]
 default_model = "gpt-4"
 
 [loop_control]
 max_steps_per_turn = 50
 max_context_size = 256000
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         // Reload
         runtime.reload_config(&config_path).await.unwrap();

@@ -12,6 +12,7 @@ const AFTER_HELP: &str = r"Environment (subset):
   KIMI_IGNORE_VISION_MODEL_HINT  1/true — skip echo/mock vision hint; use supports_vision only.
   RKI_UI_SHUTDOWN_WAIT_SECS   If >0, bound interactive UI task join on exit (§1.2 L35); 0 = wait forever.
   RKI_ACP_TOKEN               When set with `--acp`, require `Authorization: Bearer <token>` on POST /turn and GET /events (health and GET /turn hint stay open).
+  RKI_ACP_MAX_REQUEST_BYTES   Cap for a single ACP HTTP read (headers+body), default 262144; clamped 4096..16777216.
   KIMI_EXPERIMENTAL_SUBAGENT_WIRE_PERSISTENCE  1/true — persist forwarded subagent wire rows to parent session (§6.5).
 
 Config file ([models]): supports_vision, ignore_vision_model_hint (see config_registry ModelsSection).";
@@ -27,7 +28,11 @@ pub struct Cli {
     pub session: Option<String>,
     #[arg(long, help = "Auto-approve all destructive operations")]
     pub yolo: bool,
-    #[arg(long, value_delimiter = ',', help = "Comma-separated list of actions to auto-approve")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Comma-separated list of actions to auto-approve"
+    )]
     pub auto_approve: Option<Vec<String>>,
     #[arg(long, help = "Model name to use")]
     pub model: Option<String>,
@@ -57,7 +62,12 @@ pub struct Cli {
     #[arg(long = "unified-events-after", value_name = "CREATED_AT")]
     pub unified_events_after: Option<String>,
     /// New session forked from this parent session id (copies context; see `--fork-context-up-to-id`).
-    #[arg(long, value_name = "SESSION_ID", conflicts_with = "session", conflicts_with = "resume")]
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        conflicts_with = "session",
+        conflicts_with = "resume"
+    )]
     pub fork_from: Option<String>,
     /// Start ACP (Agent Communication Protocol) SSE server on the given port for IDE integrations.
     #[arg(long, value_name = "PORT", conflicts_with = "print")]
@@ -84,10 +94,24 @@ mod tests {
 
     #[test]
     fn test_cli_all_flags() {
-        let cli = Cli::try_parse_from(["rki", "--resume", "--yolo", "--auto-approve", "read_file,write_file", "--model", "gpt-4", "--work-dir", "/tmp"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "rki",
+            "--resume",
+            "--yolo",
+            "--auto-approve",
+            "read_file,write_file",
+            "--model",
+            "gpt-4",
+            "--work-dir",
+            "/tmp",
+        ])
+        .unwrap();
         assert!(cli.resume);
         assert!(cli.yolo);
-        assert_eq!(cli.auto_approve, Some(vec!["read_file".to_string(), "write_file".to_string()]));
+        assert_eq!(
+            cli.auto_approve,
+            Some(vec!["read_file".to_string(), "write_file".to_string()])
+        );
         assert_eq!(cli.model, Some("gpt-4".to_string()));
         assert_eq!(cli.work_dir, Some("/tmp".to_string()));
     }
@@ -171,7 +195,9 @@ mod tests {
     #[test]
     fn test_cli_fork_from_conflicts_with_session() {
         let err = Cli::try_parse_from(["rki", "--fork-from", "p", "--session", "s"]).unwrap_err();
-        assert!(err.to_string().contains("cannot be used with") || err.to_string().contains("conflict"));
+        assert!(
+            err.to_string().contains("cannot be used with") || err.to_string().contains("conflict")
+        );
     }
 
     #[test]

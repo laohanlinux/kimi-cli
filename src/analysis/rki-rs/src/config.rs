@@ -1,7 +1,7 @@
+use crate::capability::TrustProfile;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use crate::capability::TrustProfile;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -38,10 +38,18 @@ pub struct Config {
     pub vision_by_model: HashMap<String, bool>,
 }
 
-fn default_orchestrator() -> String { "react".to_string() }
-fn default_compaction_threshold_percent() -> f64 { 0.85 }
-fn default_compaction_threshold_absolute() -> usize { 50_000 }
-fn default_compaction_min_messages() -> usize { 4 }
+fn default_orchestrator() -> String {
+    "react".to_string()
+}
+fn default_compaction_threshold_percent() -> f64 {
+    0.85
+}
+fn default_compaction_threshold_absolute() -> usize {
+    50_000
+}
+fn default_compaction_min_messages() -> usize {
+    4
+}
 
 fn default_supports_vision() -> bool {
     true
@@ -83,7 +91,9 @@ impl Config {
     /// Apply environment variable overrides (§4.1 precedence level 2).
     /// Overrides are applied in-place; higher precedence than config file.
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(val) = std::env::var("KIMI_MODEL") && !val.is_empty() {
+        if let Ok(val) = std::env::var("KIMI_MODEL")
+            && !val.is_empty()
+        {
             self.default_model = val;
         }
         if let Ok(val) = std::env::var("KIMI_MAX_STEPS") {
@@ -96,7 +106,9 @@ impl Config {
                 self.max_context_size = Some(n);
             }
         }
-        if let Ok(val) = std::env::var("KIMI_ORCHESTRATOR") && !val.is_empty() {
+        if let Ok(val) = std::env::var("KIMI_ORCHESTRATOR")
+            && !val.is_empty()
+        {
             self.default_orchestrator = val;
         }
         if let Ok(val) = std::env::var("KIMI_RALPH_MAX_ITERATIONS") {
@@ -162,11 +174,15 @@ mod tests {
     fn test_config_load_from_toml() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 default_model = "kimi-k2"
 max_steps_per_turn = 50
 max_context_size = 64000
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.default_model, "kimi-k2");
@@ -202,11 +218,15 @@ max_context_size = 64000
     #[test]
     fn test_env_override_model() {
         let _g = ENV_OVERRIDE_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("KIMI_MODEL", "gpt-4o"); }
+        unsafe {
+            std::env::set_var("KIMI_MODEL", "gpt-4o");
+        }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         assert_eq!(cfg.default_model, "gpt-4o");
-        unsafe { std::env::remove_var("KIMI_MODEL"); }
+        unsafe {
+            std::env::remove_var("KIMI_MODEL");
+        }
     }
 
     #[test]
@@ -266,7 +286,9 @@ max_context_size = 64000
     #[test]
     fn test_env_override_supports_vision() {
         let _g = ENV_OVERRIDE_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("KIMI_SUPPORTS_VISION", "0"); }
+        unsafe {
+            std::env::set_var("KIMI_SUPPORTS_VISION", "0");
+        }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         assert!(!cfg.supports_vision);
@@ -298,10 +320,14 @@ max_context_size = 64000
     #[test]
     fn test_env_override_ignores_empty() {
         let _g = ENV_OVERRIDE_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("KIMI_MODEL", ""); }
+        unsafe {
+            std::env::set_var("KIMI_MODEL", "");
+        }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         assert_eq!(cfg.default_model, "echo"); // unchanged
-        unsafe { std::env::remove_var("KIMI_MODEL"); }
+        unsafe {
+            std::env::remove_var("KIMI_MODEL");
+        }
     }
 }

@@ -1,8 +1,8 @@
+use crate::message::Message;
+use crate::tools::function_toolkit::FunctionTool;
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::message::Message;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
-use crate::tools::function_toolkit::FunctionTool;
 
 /// Stateless function tool: think (§7.2 deviation prototype).
 /// Replaces struct-based ThinkTool with a pure async function.
@@ -38,8 +38,12 @@ pub struct ThinkTool;
 
 #[async_trait]
 impl Tool for ThinkTool {
-    fn name(&self) -> &str { "think" }
-    fn description(&self) -> &str { "Log a thought" }
+    fn name(&self) -> &str {
+        "think"
+    }
+    fn description(&self) -> &str {
+        "Log a thought"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -80,14 +84,20 @@ pub fn set_todo_list_tool() -> FunctionTool {
         |args: Value, ctx: &ToolContext| {
             let ctx = ctx.clone();
             async move {
-                let todos: Vec<String> = args.get("todos")
+                let todos: Vec<String> = args
+                    .get("todos")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let state_path = ctx.runtime.session.dir.join("state.json");
                 let mut state = if state_path.exists() {
                     let content = tokio::fs::read_to_string(&state_path).await?;
-                    serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+                    serde_json::from_str::<serde_json::Value>(&content)
+                        .unwrap_or_else(|_| serde_json::json!({}))
                 } else {
                     serde_json::json!({})
                 };
@@ -112,8 +122,12 @@ pub struct SetTodoListTool;
 
 #[async_trait]
 impl Tool for SetTodoListTool {
-    fn name(&self) -> &str { "set_todo_list" }
-    fn description(&self) -> &str { "Set the todo list" }
+    fn name(&self) -> &str {
+        "set_todo_list"
+    }
+    fn description(&self) -> &str {
+        "Set the todo list"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -125,14 +139,20 @@ impl Tool for SetTodoListTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        let todos: Vec<String> = args.get("todos")
+        let todos: Vec<String> = args
+            .get("todos")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         let state_path = ctx.runtime.session.dir.join("state.json");
         let mut state = if state_path.exists() {
             let content = tokio::fs::read_to_string(&state_path).await?;
-            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+            serde_json::from_str::<serde_json::Value>(&content)
+                .unwrap_or_else(|_| serde_json::json!({}))
         } else {
             serde_json::json!({})
         };
@@ -165,14 +185,22 @@ pub fn ask_user_question_tool() -> FunctionTool {
         |args: Value, ctx: &ToolContext| {
             let ctx = ctx.clone();
             async move {
-                let questions: Vec<String> = args.get("questions")
+                let questions: Vec<String> = args
+                    .get("questions")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let qs: Vec<crate::wire::Question> = questions.iter().map(|q| crate::wire::Question {
-                    question: q.clone(),
-                    options: vec![],
-                }).collect();
+                let qs: Vec<crate::wire::Question> = questions
+                    .iter()
+                    .map(|q| crate::wire::Question {
+                        question: q.clone(),
+                        options: vec![],
+                    })
+                    .collect();
                 let answers = ctx.runtime.question.request(qs).await?;
                 let text = answers.join("\n");
                 Ok(ToolOutput {
@@ -194,8 +222,12 @@ pub struct AskUserQuestionTool;
 
 #[async_trait]
 impl Tool for AskUserQuestionTool {
-    fn name(&self) -> &str { "ask_user_question" }
-    fn description(&self) -> &str { "Ask the user a question and wait for an answer" }
+    fn name(&self) -> &str {
+        "ask_user_question"
+    }
+    fn description(&self) -> &str {
+        "Ask the user a question and wait for an answer"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -207,14 +239,22 @@ impl Tool for AskUserQuestionTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        let questions: Vec<String> = args.get("questions")
+        let questions: Vec<String> = args
+            .get("questions")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
-        let qs: Vec<crate::wire::Question> = questions.iter().map(|q| crate::wire::Question {
-            question: q.clone(),
-            options: vec![],
-        }).collect();
+        let qs: Vec<crate::wire::Question> = questions
+            .iter()
+            .map(|q| crate::wire::Question {
+                question: q.clone(),
+                options: vec![],
+            })
+            .collect();
         let answers = ctx.runtime.question.request(qs).await?;
         let text = answers.join("\n");
         Ok(ToolOutput {
@@ -245,10 +285,18 @@ pub fn send_dmail_tool() -> FunctionTool {
         |args: Value, ctx: &ToolContext| {
             let ctx = ctx.clone();
             async move {
-                let checkpoint_id = args.get("checkpoint_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                let messages: Vec<String> = args.get("messages")
+                let checkpoint_id = args
+                    .get("checkpoint_id")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let messages: Vec<String> = args
+                    .get("messages")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let msgs: Vec<Message> = messages
                     .into_iter()
@@ -258,7 +306,9 @@ pub fn send_dmail_tool() -> FunctionTool {
                 Ok(ToolOutput {
                     result: ToolResult {
                         r#type: "success".to_string(),
-                        content: vec![ContentBlock::Text { text: "D-Mail sent".to_string() }],
+                        content: vec![ContentBlock::Text {
+                            text: "D-Mail sent".to_string(),
+                        }],
                         summary: "D-Mail queued".to_string(),
                     },
                     artifacts: vec![],
@@ -274,8 +324,12 @@ pub struct SendDMailTool;
 
 #[async_trait]
 impl Tool for SendDMailTool {
-    fn name(&self) -> &str { "send_dmail" }
-    fn description(&self) -> &str { "Send a D-Mail to a past checkpoint" }
+    fn name(&self) -> &str {
+        "send_dmail"
+    }
+    fn description(&self) -> &str {
+        "Send a D-Mail to a past checkpoint"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -288,10 +342,18 @@ impl Tool for SendDMailTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        let checkpoint_id = args.get("checkpoint_id").and_then(|v| v.as_u64()).unwrap_or(0);
-        let messages: Vec<String> = args.get("messages")
+        let checkpoint_id = args
+            .get("checkpoint_id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let messages: Vec<String> = args
+            .get("messages")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         let msgs: Vec<Message> = messages
             .into_iter()
@@ -301,7 +363,9 @@ impl Tool for SendDMailTool {
         Ok(ToolOutput {
             result: ToolResult {
                 r#type: "success".to_string(),
-                content: vec![ContentBlock::Text { text: "D-Mail sent".to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: "D-Mail sent".to_string(),
+                }],
                 summary: "D-Mail queued".to_string(),
             },
             artifacts: vec![],
@@ -323,7 +387,11 @@ mod tests {
             runtime: crate::runtime::Runtime::new(
                 crate::config::Config::default(),
                 crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-                Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+                Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
                 crate::wire::RootWireHub::new(),
                 store,
             ),
@@ -368,8 +436,13 @@ mod tests {
     async fn test_dmail_triggers_back_to_the_future() {
         let store = crate::store::Store::open(std::path::Path::new(":memory:")).unwrap();
         let hub = crate::wire::RootWireHub::new();
-        let approval = std::sync::Arc::new(crate::approval::ApprovalRuntime::new(hub.clone(), true, vec![]));
-        let session = crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap();
+        let approval = std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+            hub.clone(),
+            true,
+            vec![],
+        ));
+        let session =
+            crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap();
         let runtime = crate::runtime::Runtime::new(
             crate::config::Config::default(),
             session.clone(),
@@ -379,11 +452,15 @@ mod tests {
         );
 
         // Send a D-Mail
-        runtime.denwa_renji.send(1, vec![
-            crate::message::Message::User(crate::message::UserMessage::text(
-                "time travel message",
-            ))
-        ]).await;
+        runtime
+            .denwa_renji
+            .send(
+                1,
+                vec![crate::message::Message::User(
+                    crate::message::UserMessage::text("time travel message"),
+                )],
+            )
+            .await;
 
         // Claim it
         let dmail = runtime.denwa_renji.claim().await;
@@ -397,7 +474,8 @@ mod tests {
     async fn test_ask_user_question_tool() {
         let tool = AskUserQuestionTool;
         let ctx = test_ctx();
-        let questions = vec![serde_json::json!({"question": "What is your name?", "options": null})];
+        let questions =
+            vec![serde_json::json!({"question": "What is your name?", "options": null})];
 
         // Subscribe to hub to capture the question id and resolve it
         let mut rx = ctx.runtime.hub.subscribe();
@@ -411,7 +489,10 @@ mod tests {
             }
         });
 
-        let out = tool.call(serde_json::json!({"questions": questions}), &ctx).await.unwrap();
+        let out = tool
+            .call(serde_json::json!({"questions": questions}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.result.r#type, "success");
         assert!(out.result.summary.contains("Question answered"));
         let _ = resolve_handle.await;

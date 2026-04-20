@@ -56,9 +56,15 @@ mod tests {
         let policy = SimpleCompaction::new(2);
         let history = vec![
             Message::User(UserMessage::text("a")),
-            Message::Assistant { content: Some("b".to_string()), tool_calls: None },
+            Message::Assistant {
+                content: Some("b".to_string()),
+                tool_calls: None,
+            },
             Message::User(UserMessage::text("c")),
-            Message::Assistant { content: Some("d".to_string()), tool_calls: None },
+            Message::Assistant {
+                content: Some("d".to_string()),
+                tool_calls: None,
+            },
             Message::User(UserMessage::text("e")),
         ];
         let compacted = policy.compact(&history);
@@ -73,7 +79,10 @@ mod tests {
         let policy = SimpleCompaction::new(10);
         let history = vec![
             Message::User(UserMessage::text("a")),
-            Message::Assistant { content: Some("b".to_string()), tool_calls: None },
+            Message::Assistant {
+                content: Some("b".to_string()),
+                tool_calls: None,
+            },
         ];
         let compacted = policy.compact(&history);
         assert_eq!(compacted.len(), 2);
@@ -92,7 +101,10 @@ mod tests {
         let policy = SimpleCompaction::new(2);
         let history = vec![
             Message::User(UserMessage::text("a")),
-            Message::Assistant { content: Some("b".to_string()), tool_calls: None },
+            Message::Assistant {
+                content: Some("b".to_string()),
+                tool_calls: None,
+            },
         ];
         let compacted = policy.compact(&history);
         assert_eq!(compacted.len(), 2);

@@ -20,7 +20,9 @@ pub enum SlashOutcome {
     Message(String),
     EnterPlan,
     ExitPlan,
-    EnterRalph { max_iterations: usize },
+    EnterRalph {
+        max_iterations: usize,
+    },
     /// Toggle YOLO (approval bypass) for the session.
     ToggleYolo,
 }
@@ -43,8 +45,9 @@ impl SlashCommand {
     }
 }
 
-pub type SlashHandler =
-    Arc<dyn Fn(&SlashCommand, &crate::runtime::Runtime) -> anyhow::Result<SlashOutcome> + Send + Sync>;
+pub type SlashHandler = Arc<
+    dyn Fn(&SlashCommand, &crate::runtime::Runtime) -> anyhow::Result<SlashOutcome> + Send + Sync,
+>;
 
 /// Registry of slash command handlers.
 #[derive(Clone)]
@@ -61,7 +64,10 @@ impl SlashRegistry {
 
     pub fn register<F>(&mut self, name: impl Into<String>, handler: F)
     where
-        F: Fn(&SlashCommand, &crate::runtime::Runtime) -> anyhow::Result<SlashOutcome> + Send + Sync + 'static,
+        F: Fn(&SlashCommand, &crate::runtime::Runtime) -> anyhow::Result<SlashOutcome>
+            + Send
+            + Sync
+            + 'static,
     {
         self.handlers.insert(name.into(), Arc::new(handler));
     }
@@ -82,17 +88,17 @@ impl SlashRegistry {
 impl Default for SlashRegistry {
     fn default() -> Self {
         let mut reg = Self::new();
-        reg.register("exit", |_cmd, _rt| Ok(SlashOutcome::Message("Exiting...".to_string())));
-        reg.register("quit", |_cmd, _rt| Ok(SlashOutcome::Message("Exiting...".to_string())));
+        reg.register("exit", |_cmd, _rt| {
+            Ok(SlashOutcome::Message("Exiting...".to_string()))
+        });
+        reg.register("quit", |_cmd, _rt| {
+            Ok(SlashOutcome::Message("Exiting...".to_string()))
+        });
         reg.register("plan", |_cmd, _rt| Ok(SlashOutcome::EnterPlan));
         reg.register("unplan", |_cmd, _rt| Ok(SlashOutcome::ExitPlan));
         reg.register("yolo", |_cmd, _rt| Ok(SlashOutcome::ToggleYolo));
         reg.register("ralph", |cmd, _rt| {
-            let max = cmd
-                .args
-                .first()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(5);
+            let max = cmd.args.first().and_then(|s| s.parse().ok()).unwrap_or(5);
             Ok(SlashOutcome::EnterRalph {
                 max_iterations: max,
             })
@@ -151,7 +157,11 @@ mod tests {
         let rt = crate::runtime::Runtime::new(
             crate::config::Config::default(),
             crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-            std::sync::Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+            std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                crate::wire::RootWireHub::new(),
+                true,
+                vec![],
+            )),
             crate::wire::RootWireHub::new(),
             store,
         );
@@ -189,7 +199,11 @@ mod tests {
         let rt = crate::runtime::Runtime::new(
             crate::config::Config::default(),
             crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-            std::sync::Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+            std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                crate::wire::RootWireHub::new(),
+                true,
+                vec![],
+            )),
             crate::wire::RootWireHub::new(),
             store,
         );

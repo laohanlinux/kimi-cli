@@ -81,17 +81,16 @@ pub fn parse_openai_embedding_batch(value: &Value) -> Option<Vec<Vec<f32>>> {
     let mut out = Vec::with_capacity(data.len());
     for item in data {
         let arr = item.get("embedding")?.as_array()?;
-        let v: Vec<f32> = arr.iter().filter_map(|x| x.as_f64().map(|d| d as f32)).collect();
+        let v: Vec<f32> = arr
+            .iter()
+            .filter_map(|x| x.as_f64().map(|d| d as f32))
+            .collect();
         if v.is_empty() {
             return None;
         }
         out.push(v);
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Parse common embedding JSON shapes: OpenAI `data[0].embedding` or a top-level `embedding` array.
@@ -103,18 +102,20 @@ pub fn parse_embedding_json(value: &Value) -> Option<Vec<f32>> {
         .and_then(|o| o.get("embedding"))
         .and_then(|e| e.as_array())
     {
-        let v: Vec<f32> = arr.iter().filter_map(|x| x.as_f64().map(|d| d as f32)).collect();
+        let v: Vec<f32> = arr
+            .iter()
+            .filter_map(|x| x.as_f64().map(|d| d as f32))
+            .collect();
         if !v.is_empty() {
             return Some(v);
         }
     }
     let arr = value.get("embedding")?.as_array()?;
-    let v: Vec<f32> = arr.iter().filter_map(|x| x.as_f64().map(|d| d as f32)).collect();
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
-    }
+    let v: Vec<f32> = arr
+        .iter()
+        .filter_map(|x| x.as_f64().map(|d| d as f32))
+        .collect();
+    if v.is_empty() { None } else { Some(v) }
 }
 
 pub(crate) fn normalize_to_dim(mut v: Vec<f32>, dim: usize) -> Vec<f32> {
@@ -328,13 +329,7 @@ mod tests {
 
     #[test]
     fn http_provider_falls_back_on_unreachable() {
-        let p = HttpEmbeddingProvider::new(
-            "http://127.0.0.1:1/embed",
-            8,
-            "dummy",
-            "openai",
-            None,
-        );
+        let p = HttpEmbeddingProvider::new("http://127.0.0.1:1/embed", 8, "dummy", "openai", None);
         let a = p.embed("alpha");
         let b = p.embed("alpha");
         assert_eq!(a.len(), 8);

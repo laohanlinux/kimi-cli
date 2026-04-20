@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 #[derive(Debug, Clone)]
 pub struct MCPToolRef {
@@ -23,8 +23,14 @@ pub struct MCPResult {
 #[derive(Debug, Clone)]
 pub enum MCPContent {
     Text(String),
-    Image { data: String, mime: String },
-    Audio { data: String, mime: String },
+    Image {
+        data: String,
+        mime: String,
+    },
+    Audio {
+        data: String,
+        mime: String,
+    },
     /// MCP `resource` content block (URI reference or embedded text).
     Resource {
         uri: String,
@@ -67,12 +73,12 @@ pub enum MCPNotification {
     /// A subscribed resource has been updated.
     ResourceUpdated { uri: String },
     /// Server is requesting LLM sampling.
-    SamplingRequest {
-        id: Value,
-        messages: Vec<Value>,
-    },
+    SamplingRequest { id: Value, messages: Vec<Value> },
     /// Unknown notification method.
-    Unknown { method: String, params: Option<Value> },
+    Unknown {
+        method: String,
+        params: Option<Value>,
+    },
 }
 
 impl MCPNotification {
@@ -225,8 +231,7 @@ impl MCPClient {
                         }
                         // Try server request (has id + method)
                         if let Ok(req) = serde_json::from_str::<JsonRpcServerRequest>(&line) {
-                            if let Some(notif) = MCPNotification::from_server_request(req.clone())
-                            {
+                            if let Some(notif) = MCPNotification::from_server_request(req.clone()) {
                                 let _ = notif_tx_reader.send(notif);
                             }
                             continue;
@@ -296,7 +301,9 @@ impl MCPClient {
     /// Send a JSON-RPC response back to the server for server-to-client requests.
     async fn send_response(&self, id: Value, result: Value) -> anyhow::Result<()> {
         let mut conn = self.conn.lock().await;
-        let conn = conn.as_mut().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let conn = conn
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let resp = JsonRpcResponseSuccess {
             jsonrpc: "2.0".to_string(),
             id,
@@ -342,9 +349,7 @@ impl MCPClient {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|c| match c["type"].as_str() {
-                        Some("text") => {
-                            Some(MCPContent::Text(c["text"].as_str()?.to_string()))
-                        }
+                        Some("text") => Some(MCPContent::Text(c["text"].as_str()?.to_string())),
                         Some("image") => Some(MCPContent::Image {
                             data: c["data"].as_str()?.to_string(),
                             mime: c["mimeType"]
@@ -382,12 +387,10 @@ impl MCPClient {
 
     /// Subscribe to resource updates. Returns a receiver that yields updated URIs.
     #[allow(dead_code)]
-    pub async fn subscribe_resource(
-        &self,
-        uri: &str,
-    ) -> anyhow::Result<mpsc::Receiver<String>> {
+    pub async fn subscribe_resource(&self, uri: &str) -> anyhow::Result<mpsc::Receiver<String>> {
         let params = serde_json::json!({ "uri": uri });
-        self.call_method("resources/subscribe", Some(params)).await?;
+        self.call_method("resources/subscribe", Some(params))
+            .await?;
 
         // Create a filtered receiver for this URI
         let mut notif_rx = self.subscribe_notifications().await?;
@@ -397,10 +400,9 @@ impl MCPClient {
             loop {
                 match notif_rx.recv().await {
                     Ok(MCPNotification::ResourceUpdated { uri: updated_uri }) => {
-                        if updated_uri == uri
-                            && tx.send(updated_uri).await.is_err() {
-                                break;
-                            }
+                        if updated_uri == uri && tx.send(updated_uri).await.is_err() {
+                            break;
+                        }
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -417,7 +419,9 @@ impl MCPClient {
     }
 
     /// Subscribe to MCP server notifications (progress, resource updates, sampling, …).
-    pub async fn subscribe_notifications(&self) -> anyhow::Result<broadcast::Receiver<MCPNotification>> {
+    pub async fn subscribe_notifications(
+        &self,
+    ) -> anyhow::Result<broadcast::Receiver<MCPNotification>> {
         self.ensure_connected().await
     }
 
@@ -427,11 +431,7 @@ impl MCPClient {
     }
 
     /// Respond to a sampling request with the LLM-generated content.
-    pub async fn respond_sampling(
-        &self,
-        id: Value,
-        content: String,
-    ) -> anyhow::Result<()> {
+    pub async fn respond_sampling(&self, id: Value, content: String) -> anyhow::Result<()> {
         let result = serde_json::json!({
             "model": "default",
             "role": "assistant",
@@ -463,10 +463,7 @@ impl MCPSession {
         self.client.call_tool(name, arguments).await
     }
 
-    pub async fn subscribe_resource(
-        &self,
-        uri: &str,
-    ) -> anyhow::Result<mpsc::Receiver<String>> {
+    pub async fn subscribe_resource(&self, uri: &str) -> anyhow::Result<mpsc::Receiver<String>> {
         self.client.subscribe_resource(uri).await
     }
 
@@ -497,7 +494,9 @@ impl MCPSession {
                                 "MCP progress {}: {}/{}",
                                 progress_token,
                                 progress,
-                                total.map(|t| t.to_string()).unwrap_or_else(|| "?".to_string()),
+                                total
+                                    .map(|t| t.to_string())
+                                    .unwrap_or_else(|| "?".to_string()),
                             ),
                         });
                     }
@@ -575,7 +574,10 @@ impl MCPSession {
                                     }
                                 }
                                 if let Err(e) = client.respond_sampling(id, response_text).await {
-                                    tracing::warn!("Failed to respond to MCP sampling request: {}", e);
+                                    tracing::warn!(
+                                        "Failed to respond to MCP sampling request: {}",
+                                        e
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -719,7 +721,10 @@ time.sleep(1.0)
     async fn test_mcp_client_call_tool() {
         let cmd = mock_mcp_server_script(vec![]);
         let client = MCPClient::new("test".to_string(), cmd);
-        let result = client.call_tool("test_tool", serde_json::json!({})).await.unwrap();
+        let result = client
+            .call_tool("test_tool", serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.content.len(), 1);
         match &result.content[0] {
@@ -735,13 +740,10 @@ time.sleep(1.0)
         let mut rx = client.subscribe_resource("file:///test.txt").await.unwrap();
 
         // Wait for the resource update notification
-        let updated = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated, "file:///test.txt");
     }
 
@@ -818,7 +820,10 @@ time.sleep(1.0)
         let llm: std::sync::Arc<dyn crate::llm::ChatProvider> =
             std::sync::Arc::new(crate::llm::EchoProvider);
         let handle = session.start_sampling_handler(llm).await;
-        assert!(handle.is_ok(), "Sampling handler should start without error");
+        assert!(
+            handle.is_ok(),
+            "Sampling handler should start without error"
+        );
 
         // Let it run briefly then abort
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

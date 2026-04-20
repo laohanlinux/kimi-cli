@@ -65,16 +65,32 @@ impl Session {
         let base = session_base_dir()?;
         let dir = base.join(&id);
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            if e.kind() == std::io::ErrorKind::PermissionDenied && base != std::env::temp_dir().join("kimi-sessions") {
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                && base != std::env::temp_dir().join("kimi-sessions")
+            {
                 let tmp_base = std::env::temp_dir().join("kimi-sessions");
                 std::fs::create_dir_all(&tmp_base)?;
                 let dir = tmp_base.join(&id);
                 std::fs::create_dir_all(&dir)?;
-                return Self::finish_create(store, id, dir, work_dir, parent_session_id, fork_parent_context_rowid);
+                return Self::finish_create(
+                    store,
+                    id,
+                    dir,
+                    work_dir,
+                    parent_session_id,
+                    fork_parent_context_rowid,
+                );
             }
             return Err(e.into());
         }
-        Self::finish_create(store, id, dir, work_dir, parent_session_id, fork_parent_context_rowid)
+        Self::finish_create(
+            store,
+            id,
+            dir,
+            work_dir,
+            parent_session_id,
+            fork_parent_context_rowid,
+        )
     }
 
     fn finish_create(
@@ -112,7 +128,11 @@ impl Session {
         let row = store.get_session(id)?;
         if let Some((id, work_dir)) = row {
             let dir = session_base_dir()?.join(&id);
-            return Ok(Self { id, dir, work_dir: PathBuf::from(work_dir) });
+            return Ok(Self {
+                id,
+                dir,
+                work_dir: PathBuf::from(work_dir),
+            });
         }
         anyhow::bail!("Session not found: {}", id)
     }
@@ -130,7 +150,8 @@ impl Session {
         work_dir: PathBuf,
         max_context_entry_id: Option<i64>,
     ) -> anyhow::Result<Self> {
-        let new_session = Self::create_with_parent(store, work_dir, Some(parent_id), max_context_entry_id)?;
+        let new_session =
+            Self::create_with_parent(store, work_dir, Some(parent_id), max_context_entry_id)?;
         let entries = store.get_context(parent_id)?;
         for row in entries {
             if let Some(max_id) = max_context_entry_id {
@@ -154,7 +175,8 @@ impl Session {
     pub fn auto_title(&self, store: &Store) -> anyhow::Result<()> {
         let state = store.get_state(&self.id)?;
         let mut data = match state {
-            Some(s) => serde_json::from_str::<serde_json::Value>(&s).unwrap_or_else(|_| serde_json::json!({})),
+            Some(s) => serde_json::from_str::<serde_json::Value>(&s)
+                .unwrap_or_else(|_| serde_json::json!({})),
             None => serde_json::json!({}),
         };
         if data.get("title").and_then(|v| v.as_str()).is_some() {
@@ -168,11 +190,7 @@ impl Session {
                 let title_source = match crate::message::UserMessage::from_persistent_string(raw) {
                     Ok(u) => {
                         let s = u.flatten_for_recall();
-                        if s.is_empty() {
-                            raw.to_string()
-                        } else {
-                            s
-                        }
+                        if s.is_empty() { raw.to_string() } else { s }
                     }
                     Err(_) => raw.to_string(),
                 };
@@ -206,8 +224,12 @@ mod tests {
         let work = std::env::current_dir().unwrap();
 
         let parent = Session::create(&store, work.clone()).unwrap();
-        store.append_context(&parent.id, "user", Some("hello"), None, None, None).unwrap();
-        store.append_context(&parent.id, "assistant", Some("hi"), None, None, None).unwrap();
+        store
+            .append_context(&parent.id, "user", Some("hello"), None, None, None)
+            .unwrap();
+        store
+            .append_context(&parent.id, "assistant", Some("hi"), None, None, None)
+            .unwrap();
 
         let child = Session::fork(&store, &parent.id, work.clone()).unwrap();
         assert_ne!(child.id, parent.id);
@@ -240,14 +262,7 @@ mod tests {
             .append_context(&parent.id, "user", Some("first"), None, None, None)
             .unwrap();
         let after_second = store
-            .append_context(
-                &parent.id,
-                "assistant",
-                Some("second"),
-                None,
-                None,
-                None,
-            )
+            .append_context(&parent.id, "assistant", Some("second"), None, None, None)
             .unwrap();
         store
             .append_context(&parent.id, "user", Some("third"), None, None, None)
@@ -308,10 +323,14 @@ mod tests {
         let work = std::env::current_dir().unwrap();
 
         let s1 = Session::create(&store, work.clone()).unwrap();
-        store.append_context(&s1.id, "user", Some("rust code here"), None, None, None).unwrap();
+        store
+            .append_context(&s1.id, "user", Some("rust code here"), None, None, None)
+            .unwrap();
 
         let s2 = Session::create(&store, work.clone()).unwrap();
-        store.append_context(&s2.id, "user", Some("python code here"), None, None, None).unwrap();
+        store
+            .append_context(&s2.id, "user", Some("python code here"), None, None, None)
+            .unwrap();
 
         let results = store.search_sessions("rust").unwrap();
         assert_eq!(results.len(), 1);
@@ -355,14 +374,35 @@ mod tests {
         let work = std::env::current_dir().unwrap();
 
         let session = Session::create(&store, work.clone()).unwrap();
-        store.append_context(&session.id, "system", Some("system prompt"), None, None, None).unwrap();
-        store.append_context(&session.id, "user", Some("how do I refactor this code?"), None, None, None).unwrap();
+        store
+            .append_context(
+                &session.id,
+                "system",
+                Some("system prompt"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .append_context(
+                &session.id,
+                "user",
+                Some("how do I refactor this code?"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         session.auto_title(&store).unwrap();
 
         let state = store.get_state(&session.id).unwrap().unwrap();
         let data: serde_json::Value = serde_json::from_str(&state).unwrap();
-        assert_eq!(data["title"].as_str().unwrap(), "how do I refactor this code?");
+        assert_eq!(
+            data["title"].as_str().unwrap(),
+            "how do I refactor this code?"
+        );
     }
 
     #[test]
@@ -372,7 +412,9 @@ mod tests {
 
         let session = Session::create(&store, work.clone()).unwrap();
         let long_msg = "a".repeat(100);
-        store.append_context(&session.id, "user", Some(&long_msg), None, None, None).unwrap();
+        store
+            .append_context(&session.id, "user", Some(&long_msg), None, None, None)
+            .unwrap();
 
         session.auto_title(&store).unwrap();
 
@@ -389,8 +431,12 @@ mod tests {
         let work = std::env::current_dir().unwrap();
 
         let parent = Session::create(&store, work.clone()).unwrap();
-        store.append_context(&parent.id, "user", Some("hello"), None, None, None).unwrap();
-        store.append_context(&parent.id, "assistant", Some("hi"), None, None, None).unwrap();
+        store
+            .append_context(&parent.id, "user", Some("hello"), None, None, None)
+            .unwrap();
+        store
+            .append_context(&parent.id, "assistant", Some("hi"), None, None, None)
+            .unwrap();
 
         let child = Session::fork(&store, &parent.id, work.clone()).unwrap();
         let child_context = store.get_context(&child.id).unwrap();
@@ -413,9 +459,13 @@ mod tests {
         let work = std::env::current_dir().unwrap();
 
         let session = Session::create(&store, work.clone()).unwrap();
-        store.set_state(&session.id, r#"{"title": "Existing"}"#).unwrap();
+        store
+            .set_state(&session.id, r#"{"title": "Existing"}"#)
+            .unwrap();
 
-        store.append_context(&session.id, "user", Some("new message"), None, None, None).unwrap();
+        store
+            .append_context(&session.id, "user", Some("new message"), None, None, None)
+            .unwrap();
         session.auto_title(&store).unwrap();
 
         let state = store.get_state(&session.id).unwrap().unwrap();

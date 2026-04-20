@@ -1,9 +1,11 @@
-use async_trait::async_trait;
 use crate::llm::{ChatProvider, HttpGeneration, StreamingGeneration};
-use crate::message::{content_to_string, ContentPart, FunctionCall, Message, ToolCall, UserMessage};
-use reqwest::Client;
-use futures::StreamExt;
+use crate::message::{
+    ContentPart, FunctionCall, Message, ToolCall, UserMessage, content_to_string,
+};
+use async_trait::async_trait;
 use eventsource_stream::Eventsource;
+use futures::StreamExt;
+use reqwest::Client;
 
 pub struct AnthropicProvider {
     client: Client,
@@ -72,15 +74,18 @@ fn build_messages(history: Vec<Message>) -> Vec<serde_json::Value> {
                     "content": blocks
                 }));
             }
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let mut blocks = Vec::new();
                 if let Some(c) = content {
                     blocks.push(serde_json::json!({"type": "text", "text": c}));
                 }
                 if let Some(tcs) = tool_calls {
                     for tc in tcs {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+                        let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or(serde_json::json!({}));
                         blocks.push(serde_json::json!({
                             "type": "tool_use",
                             "id": tc.id,
@@ -91,7 +96,10 @@ fn build_messages(history: Vec<Message>) -> Vec<serde_json::Value> {
                 }
                 messages.push(serde_json::json!({"role": "assistant", "content": blocks}));
             }
-            Message::Tool { tool_call_id, content } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => {
                 let text = content_to_string(&content);
                 messages.push(serde_json::json!({
                     "role": "user",
@@ -197,7 +205,9 @@ async fn non_streaming(
             match block["type"].as_str() {
                 Some("text") => {
                     if let Some(text) = block["text"].as_str() {
-                        chunks.push(ContentPart::Text { text: text.to_string() });
+                        chunks.push(ContentPart::Text {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 Some("tool_use") => {
@@ -268,9 +278,14 @@ async fn streaming(
                     }
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&ev.data)
                         && let Some(text) = data["delta"]["text"].as_str()
-                            && !text.is_empty() {
-                                let _ = tx.send(ContentPart::Text { text: text.to_string() }).await;
-                            }
+                        && !text.is_empty()
+                    {
+                        let _ = tx
+                            .send(ContentPart::Text {
+                                text: text.to_string(),
+                            })
+                            .await;
+                    }
                 }
                 Err(_) => break,
             }
@@ -289,7 +304,10 @@ mod tests {
     fn test_build_messages_user_and_assistant() {
         let msgs = build_messages(vec![
             Message::User(UserMessage::text("hello")),
-            Message::Assistant { content: Some("hi".to_string()), tool_calls: None },
+            Message::Assistant {
+                content: Some("hi".to_string()),
+                tool_calls: None,
+            },
         ]);
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"][0]["text"], "hello");
@@ -300,7 +318,9 @@ mod tests {
     #[test]
     fn test_build_messages_skips_inline_system() {
         let msgs = build_messages(vec![
-            Message::System { content: "sys".to_string() },
+            Message::System {
+                content: "sys".to_string(),
+            },
             Message::User(UserMessage::text("u")),
         ]);
         assert_eq!(msgs.len(), 1);
@@ -313,7 +333,9 @@ mod tests {
             tool_call_id: "tc-1".to_string(),
             tool_name: "shell".to_string(),
             status: ToolStatus::Completed,
-            content: vec![ContentBlock::Text { text: "out".to_string() }],
+            content: vec![ContentBlock::Text {
+                text: "out".to_string(),
+            }],
             metrics: None,
             elapsed_ms: None,
         })]);

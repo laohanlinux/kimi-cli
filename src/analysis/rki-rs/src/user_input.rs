@@ -16,6 +16,15 @@ pub fn model_supports_vision_hint(model: &str) -> bool {
     if m == "echo" || m.starts_with("echo/") || m.contains("mock-llm") {
         return false;
     }
+    // Narrow negatives: embedding / rerank style ids are never multimodal chat.
+    if m.contains("embedding")
+        || m.contains("embed-")
+        || m.contains("text-embedding")
+        || m.contains("rerank")
+        || m.contains("moderation")
+    {
+        return false;
+    }
     true
 }
 
@@ -29,19 +38,27 @@ pub fn catalog_supports_vision_for_model(config: &Config, model: &str) -> Option
         .map(|(_, v)| *v)
 }
 
-/// Effective vision support: `supports_vision`, optional per-model catalog, then model-id hint (§1.2 L16).
-pub fn resolve_supports_vision(config: &Config) -> bool {
+/// Effective vision support for a specific **model id**: `supports_vision`, optional
+/// `[models.vision_by_model]` entry for that id, then per-id hint (§1.2 L16).
+///
+/// Use this when the active provider model may differ from `config.default_model` (e.g. `--model`).
+pub fn resolve_supports_vision_for_model(config: &Config, model: &str) -> bool {
     if !config.supports_vision {
         return false;
     }
     if config.ignore_vision_model_hint {
         return true;
     }
-    let model = config.default_model.trim();
+    let model = model.trim();
     if let Some(v) = catalog_supports_vision_for_model(config, model) {
         return v;
     }
     model_supports_vision_hint(model)
+}
+
+/// Same as [`resolve_supports_vision_for_model`] with `config.default_model`.
+pub fn resolve_supports_vision(config: &Config) -> bool {
+    resolve_supports_vision_for_model(config, &config.default_model)
 }
 
 pub fn looks_like_embedded_image(text: &str) -> bool {
@@ -101,7 +118,10 @@ fn validate_trimmed_text_and_media(
 /// - **Empty:** no parts, or only whitespace text / think with no image/audio/video URLs.
 /// - **Text-only models:** rejects `ImageUrl` / `AudioUrl` / `VideoUrl` parts and markdown/data-URL
 ///   patterns in combined text (same rules as [`validate_turn_user_input`]).
-pub fn validate_turn_content_parts(parts: &[ContentPart], supports_vision: bool) -> Result<(), UserInputRejection> {
+pub fn validate_turn_content_parts(
+    parts: &[ContentPart],
+    supports_vision: bool,
+) -> Result<(), UserInputRejection> {
     if parts.is_empty() {
         return Err(UserInputRejection::Empty);
     }
@@ -115,7 +135,9 @@ pub fn validate_turn_content_parts(parts: &[ContentPart], supports_vision: bool)
                 }
                 text_like.push_str(text);
             }
-            ContentPart::ImageUrl { .. } | ContentPart::AudioUrl { .. } | ContentPart::VideoUrl { .. } => {
+            ContentPart::ImageUrl { .. }
+            | ContentPart::AudioUrl { .. }
+            | ContentPart::VideoUrl { .. } => {
                 has_url_media = true;
             }
         }
@@ -124,7 +146,10 @@ pub fn validate_turn_content_parts(parts: &[ContentPart], supports_vision: bool)
 }
 
 /// Validate non-slash user text before it is appended to context / sent to the LLM.
-pub fn validate_turn_user_input(user_input: &str, supports_vision: bool) -> Result<(), UserInputRejection> {
+pub fn validate_turn_user_input(
+    user_input: &str,
+    supports_vision: bool,
+) -> Result<(), UserInputRejection> {
     let trimmed = user_input.trim();
     validate_trimmed_text_and_media(trimmed, false, supports_vision)
 }
@@ -179,9 +204,19 @@ mod tests {
     }
 
     #[test]
+    fn test_model_vision_hint_embedding_models_text_only() {
+        assert!(!model_supports_vision_hint("text-embedding-3-small"));
+        assert!(!model_supports_vision_hint("openai-moderation-latest"));
+        assert!(!model_supports_vision_hint("cohere-rerank-v3"));
+    }
+
+    #[test]
     fn test_resolve_supports_vision_and_flag() {
         let mut c = Config::default();
-        assert!(!resolve_supports_vision(&c), "echo + default flag uses model hint off");
+        assert!(
+            !resolve_supports_vision(&c),
+            "echo + default flag uses model hint off"
+        );
         c.supports_vision = false;
         assert!(!resolve_supports_vision(&c));
         c.supports_vision = true;
@@ -193,7 +228,10 @@ mod tests {
     fn test_resolve_supports_vision_ignore_model_hint() {
         let mut c = Config::default();
         c.ignore_vision_model_hint = true;
-        assert!(resolve_supports_vision(&c), "echo allowed when hint ignored");
+        assert!(
+            resolve_supports_vision(&c),
+            "echo allowed when hint ignored"
+        );
     }
 
     #[test]
@@ -210,6 +248,22 @@ mod tests {
         assert!(
             resolve_supports_vision(&c),
             "[models.vision_by_model] should force vision on"
+        );
+    }
+
+    #[test]
+    fn test_resolve_supports_vision_for_model_independent_of_default_model() {
+        let mut c = Config::default();
+        c.supports_vision = true;
+        c.ignore_vision_model_hint = false;
+        c.default_model = "echo".to_string();
+        assert!(
+            !resolve_supports_vision_for_model(&c, "echo"),
+            "echo hint off"
+        );
+        assert!(
+            resolve_supports_vision_for_model(&c, "gpt-4o"),
+            "gpt-4o uses API-style hint on even when default_model is echo"
         );
     }
 

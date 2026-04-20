@@ -36,7 +36,11 @@ impl ContextNode {
 
     #[allow(dead_code)]
     pub fn is_checkpoint(&self) -> bool {
-        self.checkpoint || self.messages.iter().any(|m| matches!(m, Message::Checkpoint { .. }))
+        self.checkpoint
+            || self
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::Checkpoint { .. }))
     }
 }
 
@@ -123,9 +127,11 @@ impl ContextTree {
         // Walk from root to head to find the first node containing this checkpoint
         let path = self.path_to(&self.head_id);
         for node in path {
-            if node.messages.iter().any(|m| {
-                matches!(m, Message::Checkpoint { id } if *id == checkpoint_id)
-            }) {
+            if node
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::Checkpoint { id } if *id == checkpoint_id))
+            {
                 self.head_id = node.id.clone();
                 return true;
             }
@@ -143,7 +149,13 @@ impl ContextTree {
         let summary = Message::System {
             content: "<system>Earlier messages have been compacted.</system>".to_string(),
         };
-        let kept = head.messages.iter().rev().take(4).cloned().collect::<Vec<_>>();
+        let kept = head
+            .messages
+            .iter()
+            .rev()
+            .take(4)
+            .cloned()
+            .collect::<Vec<_>>();
         let mut messages = vec![summary];
         messages.extend(kept.into_iter().rev());
         let node = ContextNode {
@@ -176,13 +188,18 @@ impl ContextTree {
 
     /// Flatten path from root to head for LLM consumption.
     pub fn linearize(&self) -> Vec<Message> {
-        self.nodes.get(&self.head_id)
+        self.nodes
+            .get(&self.head_id)
             .map(|n| n.messages.clone())
             .unwrap_or_default()
     }
 
-    pub fn head_id(&self) -> &str { &self.head_id }
-    pub fn head(&self) -> Option<&ContextNode> { self.nodes.get(&self.head_id) }
+    pub fn head_id(&self) -> &str {
+        &self.head_id
+    }
+    pub fn head(&self) -> Option<&ContextNode> {
+        self.nodes.get(&self.head_id)
+    }
     pub fn token_count(&self) -> usize {
         self.head().map(|n| n.token_count).unwrap_or(0)
     }
@@ -235,25 +252,40 @@ fn estimate_tokens(msg: &Message) -> usize {
     match msg {
         Message::System { content } => content.len() / 4,
         Message::User(u) => u.approx_chars() / 4,
-        Message::Assistant { content, tool_calls } => {
+        Message::Assistant {
+            content,
+            tool_calls,
+        } => {
             let text_len = content.as_ref().map(|s| s.len()).unwrap_or(0);
-            let tc_len = tool_calls.as_ref().map(|tcs| {
-                tcs.iter().map(|tc| tc.function.arguments.len()).sum::<usize>()
-            }).unwrap_or(0);
+            let tc_len = tool_calls
+                .as_ref()
+                .map(|tcs| {
+                    tcs.iter()
+                        .map(|tc| tc.function.arguments.len())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
             (text_len + tc_len) / 4
         }
         Message::Tool { content, .. } => {
-            let text: String = content.iter().map(|b| match b {
-                crate::message::ContentBlock::Text { text } => text.clone(),
-                _ => String::new(),
-            }).collect();
+            let text: String = content
+                .iter()
+                .map(|b| match b {
+                    crate::message::ContentBlock::Text { text } => text.clone(),
+                    _ => String::new(),
+                })
+                .collect();
             text.len() / 4
         }
         Message::ToolEvent(ev) => {
-            let text: String = ev.content.iter().map(|b| match b {
-                crate::message::ContentBlock::Text { text } => text.clone(),
-                _ => String::new(),
-            }).collect();
+            let text: String = ev
+                .content
+                .iter()
+                .map(|b| match b {
+                    crate::message::ContentBlock::Text { text } => text.clone(),
+                    _ => String::new(),
+                })
+                .collect();
             text.len() / 4
         }
         Message::SystemPrompt { content } => content.len() / 4,
@@ -271,7 +303,10 @@ mod tests {
     fn test_tree_append_and_linearize() {
         let mut tree = ContextTree::new();
         tree.append(Message::User(crate::message::UserMessage::text("hello")));
-        tree.append(Message::Assistant { content: Some("hi".to_string()), tool_calls: None });
+        tree.append(Message::Assistant {
+            content: Some("hi".to_string()),
+            tool_calls: None,
+        });
 
         let msgs = tree.linearize();
         assert_eq!(msgs.len(), 2);
@@ -286,7 +321,10 @@ mod tests {
         let cp_id = tree.next_checkpoint();
         tree.append(Message::Checkpoint { id: cp_id });
         tree.append(Message::User(crate::message::UserMessage::text("second")));
-        tree.append(Message::Assistant { content: Some("reply".to_string()), tool_calls: None });
+        tree.append(Message::Assistant {
+            content: Some("reply".to_string()),
+            tool_calls: None,
+        });
 
         assert_eq!(tree.linearize().len(), 4);
         assert!(tree.revert_to_checkpoint(cp_id));
@@ -297,7 +335,10 @@ mod tests {
     fn test_tree_compact() {
         let mut tree = ContextTree::new();
         for i in 0..10 {
-            tree.append(Message::User(crate::message::UserMessage::text(format!("msg{}", i))));
+            tree.append(Message::User(crate::message::UserMessage::text(format!(
+                "msg{}",
+                i
+            ))));
         }
         assert_eq!(tree.linearize().len(), 10);
 
@@ -312,7 +353,9 @@ mod tests {
         let mut tree = ContextTree::new();
         tree.append(Message::User(crate::message::UserMessage::text("shared")));
         let branch_point = tree.head_id().to_string();
-        tree.append(Message::User(crate::message::UserMessage::text("parent-only")));
+        tree.append(Message::User(crate::message::UserMessage::text(
+            "parent-only",
+        )));
 
         let branch = tree.branch(&branch_point).unwrap();
         assert_eq!(branch.linearize().len(), 1);
@@ -324,7 +367,9 @@ mod tests {
         let mut tree = ContextTree::new();
         let cp1 = tree.next_checkpoint();
         tree.append(Message::Checkpoint { id: cp1 });
-        tree.append(Message::User(crate::message::UserMessage::text("after cp1")));
+        tree.append(Message::User(crate::message::UserMessage::text(
+            "after cp1",
+        )));
         let cp2 = tree.next_checkpoint();
         tree.append(Message::Checkpoint { id: cp2 });
 
@@ -336,8 +381,13 @@ mod tests {
     #[test]
     fn test_tree_token_count_accumulates() {
         let mut tree = ContextTree::new();
-        tree.append(Message::User(crate::message::UserMessage::text("hello world")));
-        tree.append(Message::Assistant { content: Some("response here".to_string()), tool_calls: None });
+        tree.append(Message::User(crate::message::UserMessage::text(
+            "hello world",
+        )));
+        tree.append(Message::Assistant {
+            content: Some("response here".to_string()),
+            tool_calls: None,
+        });
         let head = tree.nodes.get(&tree.head_id).unwrap();
         // Token count is chars / 4 (conservative heuristic)
         assert!(head.token_count > 0);
@@ -367,7 +417,9 @@ mod tests {
     #[test]
     fn test_tree_append_system_prompt() {
         let mut tree = ContextTree::new();
-        tree.append(Message::SystemPrompt { content: "sys".to_string() });
+        tree.append(Message::SystemPrompt {
+            content: "sys".to_string(),
+        });
         assert_eq!(tree.linearize().len(), 1);
     }
 }

@@ -10,7 +10,10 @@ fn test_binary_help_output() {
 
     assert!(output.status.success(), "Binary exited with error");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Rust Kimi CLI Agent"), "Help should contain program name");
+    assert!(
+        stdout.contains("Rust Kimi CLI Agent"),
+        "Help should contain program name"
+    );
     assert!(stdout.contains("--resume"), "Help should mention --resume");
     assert!(stdout.contains("--yolo"), "Help should mention --yolo");
     assert!(stdout.contains("--model"), "Help should mention --model");

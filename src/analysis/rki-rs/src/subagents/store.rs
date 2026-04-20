@@ -71,7 +71,10 @@ mod tests {
         store.create_session("s1", "/tmp").unwrap();
 
         let sa_store = SubagentStore::new(store.clone());
-        sa_store.create("sa1", "s1", "You are a helper.", "Do thing").await.unwrap();
+        sa_store
+            .create("sa1", "s1", "You are a helper.", "Do thing")
+            .await
+            .unwrap();
 
         let sa = store.get_subagent("sa1").unwrap().unwrap();
         assert_eq!(sa.0, "s1");
@@ -102,10 +105,7 @@ mod tests {
         let store = Store::open(std::path::Path::new(":memory:")).unwrap();
         store.create_session("s1", "/tmp").unwrap();
         let sa_store = SubagentStore::new(store.clone());
-        sa_store
-            .create("sa1", "s1", "sys", "go")
-            .await
-            .unwrap();
+        sa_store.create("sa1", "s1", "sys", "go").await.unwrap();
         sa_store
             .append_wire(
                 "sa1",
@@ -124,7 +124,10 @@ mod tests {
         assert_eq!(wire[0].1, "text_part");
         assert_eq!(wire[1].1, "turn_end");
         let env0: crate::wire::WireEnvelope = serde_json::from_str(&wire[0].2).unwrap();
-        assert!(matches!(env0.event, crate::wire::WireEvent::TextPart { .. }));
+        assert!(matches!(
+            env0.event,
+            crate::wire::WireEvent::TextPart { .. }
+        ));
         assert_eq!(env0.source.source_type, crate::wire::SourceType::Root);
     }
 
@@ -134,8 +137,14 @@ mod tests {
         store.create_session("s1", "/tmp").unwrap();
         let sa_store = SubagentStore::new(store.clone());
 
-        sa_store.create("sa1", "s1", "sys1", "prompt1").await.unwrap();
-        sa_store.create("sa2", "s1", "sys2", "prompt2").await.unwrap();
+        sa_store
+            .create("sa1", "s1", "sys1", "prompt1")
+            .await
+            .unwrap();
+        sa_store
+            .create("sa2", "s1", "sys2", "prompt2")
+            .await
+            .unwrap();
 
         let sa1 = store.get_subagent("sa1").unwrap().unwrap();
         let sa2 = store.get_subagent("sa2").unwrap().unwrap();

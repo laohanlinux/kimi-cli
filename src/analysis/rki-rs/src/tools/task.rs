@@ -1,8 +1,8 @@
+use crate::background::TaskStatus;
+use crate::tools::function_toolkit::FunctionTool;
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::background::TaskStatus;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
-use crate::tools::function_toolkit::FunctionTool;
 
 /// Stateless function tool: task_list (§7.2 deviation prototype).
 pub fn task_list_tool() -> FunctionTool {
@@ -19,34 +19,34 @@ pub fn task_list_tool() -> FunctionTool {
         |args: Value, ctx: &ToolContext| {
             let ctx = ctx.clone();
             async move {
-                let active_only = args.get("active_only").and_then(|v| v.as_bool()).unwrap_or(true);
+                let active_only = args
+                    .get("active_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
                 let tasks = ctx.runtime.bg_manager.list().await;
-            let filtered: Vec<_> = tasks
-                .into_iter()
-                .filter(|t| {
-                    !active_only
-                        || matches!(
-                            t.status,
-                            TaskStatus::Pending | TaskStatus::Running
-                        )
+                let filtered: Vec<_> = tasks
+                    .into_iter()
+                    .filter(|t| {
+                        !active_only
+                            || matches!(t.status, TaskStatus::Pending | TaskStatus::Running)
+                    })
+                    .take(limit)
+                    .collect();
+                let text = filtered
+                    .iter()
+                    .map(|t| format!("{} {:?}", t.id, t.status))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(ToolOutput {
+                    result: ToolResult {
+                        r#type: "success".to_string(),
+                        content: vec![ContentBlock::Text { text }],
+                        summary: format!("{} tasks", filtered.len()),
+                    },
+                    artifacts: vec![],
+                    metrics: ToolMetrics::default(),
                 })
-                .take(limit)
-                .collect();
-            let text = filtered
-                .iter()
-                .map(|t| format!("{} {:?}", t.id, t.status))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Ok(ToolOutput {
-                result: ToolResult {
-                    r#type: "success".to_string(),
-                    content: vec![ContentBlock::Text { text }],
-                    summary: format!("{} tasks", filtered.len()),
-                },
-                artifacts: vec![],
-                metrics: ToolMetrics::default(),
-            })
             }
         },
     )
@@ -57,8 +57,12 @@ pub struct TaskListTool;
 
 #[async_trait]
 impl Tool for TaskListTool {
-    fn name(&self) -> &str { "task_list" }
-    fn description(&self) -> &str { "List background tasks" }
+    fn name(&self) -> &str {
+        "task_list"
+    }
+    fn description(&self) -> &str {
+        "List background tasks"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -70,17 +74,16 @@ impl Tool for TaskListTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        let active_only = args.get("active_only").and_then(|v| v.as_bool()).unwrap_or(true);
+        let active_only = args
+            .get("active_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
         let tasks = ctx.runtime.bg_manager.list().await;
         let filtered: Vec<_> = tasks
             .into_iter()
             .filter(|t| {
-                !active_only
-                    || matches!(
-                        t.status,
-                        TaskStatus::Pending | TaskStatus::Running
-                    )
+                !active_only || matches!(t.status, TaskStatus::Pending | TaskStatus::Running)
             })
             .take(limit)
             .collect();
@@ -139,8 +142,12 @@ pub struct TaskOutputTool;
 
 #[async_trait]
 impl Tool for TaskOutputTool {
-    fn name(&self) -> &str { "task_output" }
-    fn description(&self) -> &str { "Get background task output" }
+    fn name(&self) -> &str {
+        "task_output"
+    }
+    fn description(&self) -> &str {
+        "Get background task output"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -185,18 +192,24 @@ pub fn task_stop_tool() -> FunctionTool {
             let ctx = ctx.clone();
             async move {
                 let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-                let approved = ctx.runtime.approval.request_tool(
-                    "".to_string(),
-                    "task_stop",
-                    &args,
-                    format!("Stop background task {}", task_id),
-                    format!("Stop task {}", task_id),
-                ).await?;
+                let approved = ctx
+                    .runtime
+                    .approval
+                    .request_tool(
+                        "".to_string(),
+                        "task_stop",
+                        &args,
+                        format!("Stop background task {}", task_id),
+                        format!("Stop task {}", task_id),
+                    )
+                    .await?;
                 if !approved {
                     return Ok(ToolOutput {
                         result: ToolResult {
                             r#type: "error".to_string(),
-                            content: vec![ContentBlock::Text { text: "Approval rejected".to_string() }],
+                            content: vec![ContentBlock::Text {
+                                text: "Approval rejected".to_string(),
+                            }],
                             summary: "Approval rejected".to_string(),
                         },
                         artifacts: vec![],
@@ -207,7 +220,9 @@ pub fn task_stop_tool() -> FunctionTool {
                 Ok(ToolOutput {
                     result: ToolResult {
                         r#type: "success".to_string(),
-                        content: vec![ContentBlock::Text { text: format!("Stopped {}", task_id) }],
+                        content: vec![ContentBlock::Text {
+                            text: format!("Stopped {}", task_id),
+                        }],
                         summary: "Task stopped".to_string(),
                     },
                     artifacts: vec![],
@@ -223,8 +238,12 @@ pub struct TaskStopTool;
 
 #[async_trait]
 impl Tool for TaskStopTool {
-    fn name(&self) -> &str { "task_stop" }
-    fn description(&self) -> &str { "Stop a background task" }
+    fn name(&self) -> &str {
+        "task_stop"
+    }
+    fn description(&self) -> &str {
+        "Stop a background task"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -238,18 +257,24 @@ impl Tool for TaskStopTool {
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-        let approved = ctx.runtime.approval.request_tool(
-            "".to_string(),
-            "task_stop",
-            &args,
-            format!("Stop background task {}", task_id),
-            format!("Stop task {}", task_id),
-        ).await?;
+        let approved = ctx
+            .runtime
+            .approval
+            .request_tool(
+                "".to_string(),
+                "task_stop",
+                &args,
+                format!("Stop background task {}", task_id),
+                format!("Stop task {}", task_id),
+            )
+            .await?;
         if !approved {
             return Ok(ToolOutput {
                 result: ToolResult {
                     r#type: "error".to_string(),
-                    content: vec![ContentBlock::Text { text: "Approval rejected".to_string() }],
+                    content: vec![ContentBlock::Text {
+                        text: "Approval rejected".to_string(),
+                    }],
                     summary: "Approval rejected".to_string(),
                 },
                 artifacts: vec![],
@@ -260,7 +285,9 @@ impl Tool for TaskStopTool {
         Ok(ToolOutput {
             result: ToolResult {
                 r#type: "success".to_string(),
-                content: vec![ContentBlock::Text { text: format!("Stopped {}", task_id) }],
+                content: vec![ContentBlock::Text {
+                    text: format!("Stopped {}", task_id),
+                }],
                 summary: "Task stopped".to_string(),
             },
             artifacts: vec![],
@@ -272,12 +299,12 @@ impl Tool for TaskStopTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::Runtime;
-    use crate::config::Config;
     use crate::approval::ApprovalRuntime;
-    use crate::wire::RootWireHub;
+    use crate::config::Config;
+    use crate::runtime::Runtime;
     use crate::session::Session;
     use crate::store::Store;
+    use crate::wire::RootWireHub;
     use std::sync::Arc;
 
     fn test_ctx() -> ToolContext {
@@ -287,16 +314,25 @@ mod tests {
         let runtime = Runtime::new(
             Config::default(),
             Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-            approval, hub, store,
+            approval,
+            hub,
+            store,
         );
-        ToolContext { runtime, hub: None, token: crate::token::ContextToken::new("test", "turn") }
+        ToolContext {
+            runtime,
+            hub: None,
+            token: crate::token::ContextToken::new("test", "turn"),
+        }
     }
 
     #[tokio::test]
     async fn test_task_list_empty() {
         let ctx = test_ctx();
         let tool = task_list_tool();
-        let out = tool.call(serde_json::json!({"active_only": true, "limit": 20}), &ctx).await.unwrap();
+        let out = tool
+            .call(serde_json::json!({"active_only": true, "limit": 20}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.result.summary, "0 tasks");
         assert_eq!(tool.name(), "task_list");
     }
@@ -306,7 +342,9 @@ mod tests {
         // cancel() does not error on missing tasks; it silently updates store status
         let ctx = test_ctx();
         let tool = task_stop_tool();
-        let result = tool.call(serde_json::json!({"task_id": "missing"}), &ctx).await;
+        let result = tool
+            .call(serde_json::json!({"task_id": "missing"}), &ctx)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().result.summary.contains("Task stopped"));
         assert_eq!(tool.name(), "task_stop");
@@ -316,7 +354,10 @@ mod tests {
     async fn test_task_list_inactive_included_when_active_only_false() {
         let ctx = test_ctx();
         let tool = TaskListTool;
-        let out = tool.call(serde_json::json!({"active_only": false, "limit": 20}), &ctx).await.unwrap();
+        let out = tool
+            .call(serde_json::json!({"active_only": false, "limit": 20}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.result.summary, "0 tasks");
     }
 

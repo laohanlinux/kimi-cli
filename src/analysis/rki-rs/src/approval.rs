@@ -8,12 +8,12 @@ use crate::wire::{RootWireHub, WireEvent};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Mutex, oneshot};
 
 #[cfg(test)]
-use crate::capability::{TrustProfile, CapabilityOverride};
+use crate::capability::{CapabilityOverride, TrustProfile};
 
 #[derive(Clone)]
 pub struct ApprovalRequestRecord {
@@ -35,7 +35,9 @@ pub trait ApprovalSink: Send + Sync {
     fn priority(&self) -> i32;
     fn is_available(&self) -> bool;
     /// Timeout for this approval channel in seconds.
-    fn timeout_secs(&self) -> u64 { 300 }
+    fn timeout_secs(&self) -> u64 {
+        300
+    }
     /// Handle an approval request. Returns Ok(approved) if handled, Err otherwise.
     async fn request(
         &self,
@@ -57,9 +59,15 @@ impl BroadcastSink {
 
 #[async_trait]
 impl ApprovalSink for BroadcastSink {
-    fn name(&self) -> &str { "broadcast" }
-    fn priority(&self) -> i32 { 0 }
-    fn is_available(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "broadcast"
+    }
+    fn priority(&self) -> i32 {
+        0
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
 
     async fn request(
         &self,
@@ -74,11 +82,8 @@ impl ApprovalSink for BroadcastSink {
             description: req.description.clone(),
             display: req.display.clone(),
         });
-        let approved = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            resolve_rx,
-        )
-        .await??;
+        let approved =
+            tokio::time::timeout(std::time::Duration::from_secs(300), resolve_rx).await??;
         Ok(approved)
     }
 }
@@ -98,14 +103,19 @@ impl ShellSink {
     }
 
     pub fn set_interactive(&self, active: bool) {
-        self.interactive.store(active, std::sync::atomic::Ordering::SeqCst);
+        self.interactive
+            .store(active, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl ApprovalSink for ShellSink {
-    fn name(&self) -> &str { "shell" }
-    fn priority(&self) -> i32 { 100 }
+    fn name(&self) -> &str {
+        "shell"
+    }
+    fn priority(&self) -> i32 {
+        100
+    }
     fn is_available(&self) -> bool {
         self.interactive.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -123,11 +133,8 @@ impl ApprovalSink for ShellSink {
             description: req.description.clone(),
             display: req.display.clone(),
         });
-        let approved = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            resolve_rx,
-        )
-        .await??;
+        let approved =
+            tokio::time::timeout(std::time::Duration::from_secs(300), resolve_rx).await??;
         Ok(approved)
     }
 }
@@ -147,14 +154,19 @@ impl WireSink {
     }
 
     pub fn set_connected(&self, connected: bool) {
-        self.connected.store(connected, std::sync::atomic::Ordering::SeqCst);
+        self.connected
+            .store(connected, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl ApprovalSink for WireSink {
-    fn name(&self) -> &str { "wire" }
-    fn priority(&self) -> i32 { 50 }
+    fn name(&self) -> &str {
+        "wire"
+    }
+    fn priority(&self) -> i32 {
+        50
+    }
     fn is_available(&self) -> bool {
         self.connected.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -172,11 +184,8 @@ impl ApprovalSink for WireSink {
             description: req.description.clone(),
             display: req.display.clone(),
         });
-        let approved = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            resolve_rx,
-        )
-        .await??;
+        let approved =
+            tokio::time::timeout(std::time::Duration::from_secs(300), resolve_rx).await??;
         Ok(approved)
     }
 }
@@ -194,9 +203,15 @@ impl BackgroundSink {
 
 #[async_trait]
 impl ApprovalSink for BackgroundSink {
-    fn name(&self) -> &str { "background" }
-    fn priority(&self) -> i32 { 10 }
-    fn is_available(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "background"
+    }
+    fn priority(&self) -> i32 {
+        10
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
 
     async fn request(
         &self,
@@ -211,11 +226,8 @@ impl ApprovalSink for BackgroundSink {
             description: req.description.clone(),
             display: req.display.clone(),
         });
-        let approved = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            resolve_rx,
-        )
-        .await??;
+        let approved =
+            tokio::time::timeout(std::time::Duration::from_secs(300), resolve_rx).await??;
         Ok(approved)
     }
 }
@@ -307,11 +319,7 @@ pub struct ApprovalRuntime {
 }
 
 impl ApprovalRuntime {
-    pub fn new(
-        hub: RootWireHub,
-        yolo: bool,
-        auto_approve_actions: Vec<String>,
-    ) -> Self {
+    pub fn new(hub: RootWireHub, yolo: bool, auto_approve_actions: Vec<String>) -> Self {
         let shell_sink = Arc::new(ShellSink::new(hub.clone()));
         let wire_sink = Arc::new(WireSink::new(hub.clone()));
         let mut router = ApprovalRouter::new();
@@ -373,7 +381,8 @@ impl ApprovalRuntime {
         if self.is_yolo() || self.auto_approve_actions.contains(&action) {
             return Ok(true);
         }
-        self._request(tool_call_id, sender, action, description, display).await
+        self._request(tool_call_id, sender, action, description, display)
+            .await
     }
 
     /// Capability-based approval request with tool arguments.
@@ -391,18 +400,19 @@ impl ApprovalRuntime {
 
         // Capability-based authorization
         if let Some(ref engine) = self.capability_engine
-            && let Some(capability) = tool_to_capability(tool_name) {
-                let constraints = extract_constraints(tool_name, args);
-                match engine.check(capability, &constraints) {
-                    Decision::Auto => return Ok(true),
-                    Decision::Block => {
-                        return Ok(false);
-                    }
-                    Decision::Prompt => {
-                        // Fall through to interactive approval
-                    }
+            && let Some(capability) = tool_to_capability(tool_name)
+        {
+            let constraints = extract_constraints(tool_name, args);
+            match engine.check(capability, &constraints) {
+                Decision::Auto => return Ok(true),
+                Decision::Block => {
+                    return Ok(false);
+                }
+                Decision::Prompt => {
+                    // Fall through to interactive approval
                 }
             }
+        }
 
         // Fallback to action-based auto-approve for backward compatibility
         let action = tool_name.to_string();
@@ -410,8 +420,14 @@ impl ApprovalRuntime {
             return Ok(true);
         }
 
-        self._request(tool_call_id, "tool".to_string(), action, description, display)
-            .await
+        self._request(
+            tool_call_id,
+            "tool".to_string(),
+            action,
+            description,
+            display,
+        )
+        .await
     }
 
     async fn _request(
@@ -437,7 +453,9 @@ impl ApprovalRuntime {
         self.requests.lock().await.insert(id.clone(), req.clone());
         let (tx, rx) = oneshot::channel();
         self.waiters.lock().await.insert(id.clone(), tx);
-        let sink = self.router.select_sink()
+        let sink = self
+            .router
+            .select_sink()
             .ok_or_else(|| anyhow::anyhow!("No approval sink available"))?;
         let approved = sink.request(&req, rx).await?;
         Ok(approved)
@@ -506,12 +524,17 @@ mod tests {
     async fn test_capability_auto_approve() {
         let hub = RootWireHub::new();
         let engine = CapabilityEngine::new(test_profile());
-        let approval = ApprovalRuntime::new(hub, false, vec![])
-            .with_capability_engine(engine);
+        let approval = ApprovalRuntime::new(hub, false, vec![]).with_capability_engine(engine);
 
         let args = serde_json::json!({"command": "git status"});
         let result = approval
-            .request_tool("tc1".to_string(), "shell", &args, "git status".to_string(), "".to_string())
+            .request_tool(
+                "tc1".to_string(),
+                "shell",
+                &args,
+                "git status".to_string(),
+                "".to_string(),
+            )
             .await;
         assert!(result.unwrap(), "git commands should be auto-approved");
     }
@@ -520,12 +543,17 @@ mod tests {
     async fn test_capability_block() {
         let hub = RootWireHub::new();
         let engine = CapabilityEngine::new(test_profile());
-        let approval = ApprovalRuntime::new(hub, false, vec![])
-            .with_capability_engine(engine);
+        let approval = ApprovalRuntime::new(hub, false, vec![]).with_capability_engine(engine);
 
         let args = serde_json::json!({"command": "rm -rf /"});
         let result = approval
-            .request_tool("tc2".to_string(), "shell", &args, "rm -rf /".to_string(), "".to_string())
+            .request_tool(
+                "tc2".to_string(),
+                "shell",
+                &args,
+                "rm -rf /".to_string(),
+                "".to_string(),
+            )
             .await;
         assert!(!result.unwrap(), "rm commands should be blocked");
     }
@@ -535,8 +563,8 @@ mod tests {
         let hub = RootWireHub::new();
         let mut rx = hub.subscribe();
         let engine = CapabilityEngine::new(test_profile());
-        let approval = ApprovalRuntime::new(hub.clone(), false, vec![])
-            .with_capability_engine(engine);
+        let approval =
+            ApprovalRuntime::new(hub.clone(), false, vec![]).with_capability_engine(engine);
 
         // Spawn a resolver task that auto-approves any request
         let approval_clone = std::sync::Arc::new(approval);
@@ -553,21 +581,35 @@ mod tests {
         // Unknown command should fall back to prompt (and our resolver approves it)
         let args = serde_json::json!({"command": "echo hello"});
         let result = approval_clone
-            .request_tool("tc3".to_string(), "shell", &args, "echo hello".to_string(), "".to_string())
+            .request_tool(
+                "tc3".to_string(),
+                "shell",
+                &args,
+                "echo hello".to_string(),
+                "".to_string(),
+            )
             .await;
-        assert!(result.unwrap(), "unknown commands should fall through to prompt approval");
+        assert!(
+            result.unwrap(),
+            "unknown commands should fall through to prompt approval"
+        );
     }
 
     #[tokio::test]
     async fn test_capability_filesystem_auto() {
         let hub = RootWireHub::new();
         let engine = CapabilityEngine::new(test_profile());
-        let approval = ApprovalRuntime::new(hub, false, vec![])
-            .with_capability_engine(engine);
+        let approval = ApprovalRuntime::new(hub, false, vec![]).with_capability_engine(engine);
 
         let args = serde_json::json!({"path": "/tmp/test.txt"});
         let result = approval
-            .request_tool("tc4".to_string(), "write_file", &args, "write".to_string(), "".to_string())
+            .request_tool(
+                "tc4".to_string(),
+                "write_file",
+                &args,
+                "write".to_string(),
+                "".to_string(),
+            )
             .await;
         assert!(result.unwrap(), "writes to /tmp should be auto-approved");
     }
@@ -587,12 +629,17 @@ mod tests {
     async fn test_yolo_bypasses_capabilities() {
         let hub = RootWireHub::new();
         let engine = CapabilityEngine::new(test_profile());
-        let approval = ApprovalRuntime::new(hub, true, vec![])
-            .with_capability_engine(engine);
+        let approval = ApprovalRuntime::new(hub, true, vec![]).with_capability_engine(engine);
 
         let args = serde_json::json!({"command": "rm -rf /"});
         let result = approval
-            .request_tool("tc5".to_string(), "shell", &args, "rm -rf /".to_string(), "".to_string())
+            .request_tool(
+                "tc5".to_string(),
+                "shell",
+                &args,
+                "rm -rf /".to_string(),
+                "".to_string(),
+            )
             .await;
         assert!(result.unwrap(), "yolo should bypass even block decisions");
     }
@@ -611,9 +658,13 @@ mod tests {
                 &serde_json::json!({"command": "echo hi"}),
                 "Run shell".to_string(),
                 "echo hi".to_string(),
-            )
-        ).await;
-        assert!(result.is_err(), "Expected timeout since no one resolved the approval");
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "Expected timeout since no one resolved the approval"
+        );
     }
 
     #[test]
@@ -635,7 +686,11 @@ mod tests {
         router.register(Box::new(shell));
 
         let selected = router.select_sink().unwrap();
-        assert_eq!(selected.name(), "shell", "Shell should be selected when interactive");
+        assert_eq!(
+            selected.name(),
+            "shell",
+            "Shell should be selected when interactive"
+        );
     }
 
     #[test]
@@ -657,7 +712,11 @@ mod tests {
         router.register(Box::new(shell));
 
         let selected = router.select_sink().unwrap();
-        assert_eq!(selected.name(), "wire", "Wire should be selected when connected and shell unavailable");
+        assert_eq!(
+            selected.name(),
+            "wire",
+            "Wire should be selected when connected and shell unavailable"
+        );
     }
 
     #[test]
@@ -679,7 +738,11 @@ mod tests {
         router.register(Box::new(shell));
 
         let selected = router.select_sink().unwrap();
-        assert_eq!(selected.name(), "background", "Background should be selected when shell and wire unavailable");
+        assert_eq!(
+            selected.name(),
+            "background",
+            "Background should be selected when shell and wire unavailable"
+        );
     }
 
     #[test]
@@ -695,7 +758,10 @@ mod tests {
         router.register(Box::new(shell));
         router.register(Box::new(wire));
 
-        assert!(router.select_sink().is_none(), "No sinks should be available");
+        assert!(
+            router.select_sink().is_none(),
+            "No sinks should be available"
+        );
     }
 
     #[test]

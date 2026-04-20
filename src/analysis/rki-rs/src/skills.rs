@@ -46,13 +46,18 @@ pub async fn discover_skills(work_dir: &Path) -> Vec<Skill> {
             if !skill_md.is_file() {
                 continue;
             }
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
             match tokio::fs::read_to_string(&skill_md).await {
                 Ok(content) => {
-                    skills.push(Skill { name, path, content });
+                    skills.push(Skill {
+                        name,
+                        path,
+                        content,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("Failed to read {}: {}", skill_md.display(), e);

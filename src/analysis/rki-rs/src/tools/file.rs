@@ -1,6 +1,6 @@
+use crate::tools::{ContentBlock, Tool, ToolContext, ToolMetrics, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
-use crate::tools::{Tool, ToolContext, ToolOutput, ToolResult, ContentBlock, ToolMetrics};
 use tokio::io::AsyncWriteExt;
 
 pub struct ReadFileTool;
@@ -9,8 +9,12 @@ pub struct ReadMediaFileTool;
 
 #[async_trait]
 impl Tool for ReadMediaFileTool {
-    fn name(&self) -> &str { "read_media_file" }
-    fn description(&self) -> &str { "Read an image or video file and return it as a data URL" }
+    fn name(&self) -> &str {
+        "read_media_file"
+    }
+    fn description(&self) -> &str {
+        "Read an image or video file and return it as a data URL"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -61,11 +65,14 @@ impl Tool for ReadMediaFileTool {
     }
 }
 
-
 #[async_trait]
 impl Tool for ReadFileTool {
-    fn name(&self) -> &str { "read_file" }
-    fn description(&self) -> &str { "Read contents of a file" }
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn description(&self) -> &str {
+        "Read contents of a file"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -80,25 +87,34 @@ impl Tool for ReadFileTool {
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let approved = ctx.runtime.approval.request_tool(
-            "".to_string(),
-            "str_replace_file",
-            &args,
-            format!("Edit file {}", path),
-            format!("Replace text in {}", path),
-        ).await?;
+        let approved = ctx
+            .runtime
+            .approval
+            .request_tool(
+                "".to_string(),
+                "str_replace_file",
+                &args,
+                format!("Edit file {}", path),
+                format!("Replace text in {}", path),
+            )
+            .await?;
         if !approved {
             return Ok(ToolOutput {
                 result: ToolResult {
                     r#type: "error".to_string(),
-                    content: vec![ContentBlock::Text { text: "Approval rejected".to_string() }],
+                    content: vec![ContentBlock::Text {
+                        text: "Approval rejected".to_string(),
+                    }],
                     summary: "Approval rejected".to_string(),
                 },
                 artifacts: vec![],
                 metrics: ToolMetrics::default(),
             });
         }
-        let line_offset = args.get("line_offset").and_then(|v| v.as_i64()).unwrap_or(1);
+        let line_offset = args
+            .get("line_offset")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
         let n_lines = args.get("n_lines").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
         let content = tokio::fs::read_to_string(path).await?;
         let lines: Vec<&str> = content.lines().collect();
@@ -125,8 +141,12 @@ pub struct WriteFileTool;
 
 #[async_trait]
 impl Tool for WriteFileTool {
-    fn name(&self) -> &str { "write_file" }
-    fn description(&self) -> &str { "Write or append to a file" }
+    fn name(&self) -> &str {
+        "write_file"
+    }
+    fn description(&self) -> &str {
+        "Write or append to a file"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -142,19 +162,28 @@ impl Tool for WriteFileTool {
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
         let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("overwrite");
-        let approved = ctx.runtime.approval.request_tool(
-            "".to_string(),
-            "write_file",
-            &args,
-            format!("{} file {}", mode, path),
-            format!("{} {} bytes to {}", mode, content.len(), path),
-        ).await?;
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("overwrite");
+        let approved = ctx
+            .runtime
+            .approval
+            .request_tool(
+                "".to_string(),
+                "write_file",
+                &args,
+                format!("{} file {}", mode, path),
+                format!("{} {} bytes to {}", mode, content.len(), path),
+            )
+            .await?;
         if !approved {
             return Ok(ToolOutput {
                 result: ToolResult {
                     r#type: "error".to_string(),
-                    content: vec![ContentBlock::Text { text: "Approval rejected".to_string() }],
+                    content: vec![ContentBlock::Text {
+                        text: "Approval rejected".to_string(),
+                    }],
                     summary: "Approval rejected".to_string(),
                 },
                 artifacts: vec![],
@@ -184,7 +213,9 @@ impl Tool for WriteFileTool {
                 r#type: "success".to_string(),
                 content: vec![
                     ContentBlock::Diff { before, after },
-                    ContentBlock::Text { text: format!("Wrote {} bytes to {}", content.len(), path) },
+                    ContentBlock::Text {
+                        text: format!("Wrote {} bytes to {}", content.len(), path),
+                    },
                 ],
                 summary: "File written".to_string(),
             },
@@ -198,8 +229,12 @@ pub struct StrReplaceFileTool;
 
 #[async_trait]
 impl Tool for StrReplaceFileTool {
-    fn name(&self) -> &str { "str_replace_file" }
-    fn description(&self) -> &str { "Replace strings in a file" }
+    fn name(&self) -> &str {
+        "str_replace_file"
+    }
+    fn description(&self) -> &str {
+        "Replace strings in a file"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -221,10 +256,15 @@ impl Tool for StrReplaceFileTool {
 
     async fn call(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let edit = args.get("edit").ok_or_else(|| anyhow::anyhow!("Missing edit"))?;
+        let edit = args
+            .get("edit")
+            .ok_or_else(|| anyhow::anyhow!("Missing edit"))?;
         let old = edit.get("old").and_then(|v| v.as_str()).unwrap_or("");
         let new = edit.get("new").and_then(|v| v.as_str()).unwrap_or("");
-        let replace_all = edit.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let replace_all = edit
+            .get("replace_all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let before = tokio::fs::read_to_string(path).await?;
         let after = if replace_all {
             before.replace(old, new)
@@ -237,7 +277,9 @@ impl Tool for StrReplaceFileTool {
                 r#type: "success".to_string(),
                 content: vec![
                     ContentBlock::Diff { before, after },
-                    ContentBlock::Text { text: format!("Replaced in {}", path) },
+                    ContentBlock::Text {
+                        text: format!("Replaced in {}", path),
+                    },
                 ],
                 summary: "Replacement done".to_string(),
             },
@@ -251,8 +293,12 @@ pub struct GlobTool;
 
 #[async_trait]
 impl Tool for GlobTool {
-    fn name(&self) -> &str { "glob" }
-    fn description(&self) -> &str { "Find files by glob pattern" }
+    fn name(&self) -> &str {
+        "glob"
+    }
+    fn description(&self) -> &str {
+        "Find files by glob pattern"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -267,9 +313,17 @@ impl Tool for GlobTool {
 
     async fn call(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-        let dir = args.get("directory").and_then(|v| v.as_str()).map(std::path::PathBuf::from);
-        let include_dirs = args.get("include_dirs").and_then(|v| v.as_bool()).unwrap_or(false);
-        let regex = regex::escape(pattern).replace("\\*", ".*").replace("\\?", ".");
+        let dir = args
+            .get("directory")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from);
+        let include_dirs = args
+            .get("include_dirs")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let regex = regex::escape(pattern)
+            .replace("\\*", ".*")
+            .replace("\\?", ".");
         let re = regex::Regex::new(&format!("^{}$", regex))?;
         let root = dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let mut results = Vec::new();
@@ -289,7 +343,9 @@ impl Tool for GlobTool {
         Ok(ToolOutput {
             result: ToolResult {
                 r#type: "success".to_string(),
-                content: vec![ContentBlock::Text { text: results.join("\n") }],
+                content: vec![ContentBlock::Text {
+                    text: results.join("\n"),
+                }],
                 summary: format!("Found {} matches", results.len()),
             },
             artifacts: vec![],
@@ -302,8 +358,12 @@ pub struct GrepTool;
 
 #[async_trait]
 impl Tool for GrepTool {
-    fn name(&self) -> &str { "grep" }
-    fn description(&self) -> &str { "Search file contents with regex" }
+    fn name(&self) -> &str {
+        "grep"
+    }
+    fn description(&self) -> &str {
+        "Search file contents with regex"
+    }
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -323,11 +383,19 @@ impl Tool for GrepTool {
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
         let path = args.get("path").and_then(|v| v.as_str());
         let glob = args.get("glob").and_then(|v| v.as_str());
-        let output_mode = args.get("output_mode").and_then(|v| v.as_str()).unwrap_or("content");
-        let head_limit = args.get("head_limit").and_then(|v| v.as_u64()).unwrap_or(250) as usize;
+        let output_mode = args
+            .get("output_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("content");
+        let head_limit = args
+            .get("head_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(250) as usize;
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let re = regex::Regex::new(pattern)?;
-        let root = path.map(std::path::PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let root = path
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let mut results = Vec::new();
         let mut count = 0usize;
         for entry in walkdir::WalkDir::new(root).max_depth(10) {
@@ -336,9 +404,10 @@ impl Tool for GrepTool {
                 continue;
             }
             if let Some(g) = glob
-                && !entry.file_name().to_string_lossy().contains(g) {
-                    continue;
-                }
+                && !entry.file_name().to_string_lossy().contains(g)
+            {
+                continue;
+            }
             let content = match tokio::fs::read_to_string(entry.path()).await {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -364,7 +433,12 @@ impl Tool for GrepTool {
         let text = if output_mode == "count_matches" {
             format!("{}", count)
         } else {
-            results.into_iter().skip(offset).take(head_limit).collect::<Vec<_>>().join("\n")
+            results
+                .into_iter()
+                .skip(offset)
+                .take(head_limit)
+                .collect::<Vec<_>>()
+                .join("\n")
         };
         Ok(ToolOutput {
             result: ToolResult {
@@ -391,7 +465,11 @@ mod tests {
             runtime: crate::runtime::Runtime::new(
                 crate::config::Config::default(),
                 crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
-                Arc::new(crate::approval::ApprovalRuntime::new(crate::wire::RootWireHub::new(), true, vec![])),
+                Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
                 crate::wire::RootWireHub::new(),
                 store,
             ),
@@ -401,7 +479,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_file() {
         let temp = tempfile::NamedTempFile::new().unwrap();
-        tokio::fs::write(temp.path(), "line1\nline2\nline3\n").await.unwrap();
+        tokio::fs::write(temp.path(), "line1\nline2\nline3\n")
+            .await
+            .unwrap();
         let tool = ReadFileTool;
         let args = serde_json::json!({ "path": temp.path().to_str().unwrap() });
         let output = tool.call(args, &test_ctx()).await.unwrap();
@@ -428,7 +508,13 @@ mod tests {
         let read = tokio::fs::read_to_string(temp.path()).await.unwrap();
         assert_eq!(read, "new content");
         // §7.3: verify Diff content block is present
-        assert!(output.result.content.iter().any(|b| matches!(b, ContentBlock::Diff { before, .. } if before == "old content")));
+        assert!(
+            output
+                .result
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Diff { before, .. } if before == "old content"))
+        );
     }
 
     #[tokio::test]
@@ -450,7 +536,9 @@ mod tests {
     #[tokio::test]
     async fn test_str_replace_file_single() {
         let temp = tempfile::NamedTempFile::new().unwrap();
-        tokio::fs::write(temp.path(), "hello world hello").await.unwrap();
+        tokio::fs::write(temp.path(), "hello world hello")
+            .await
+            .unwrap();
         let tool = StrReplaceFileTool;
         let args = serde_json::json!({
             "path": temp.path().to_str().unwrap(),
@@ -467,7 +555,9 @@ mod tests {
     #[tokio::test]
     async fn test_str_replace_file_all() {
         let temp = tempfile::NamedTempFile::new().unwrap();
-        tokio::fs::write(temp.path(), "hello world hello").await.unwrap();
+        tokio::fs::write(temp.path(), "hello world hello")
+            .await
+            .unwrap();
         let tool = StrReplaceFileTool;
         let args = serde_json::json!({
             "path": temp.path().to_str().unwrap(),
@@ -482,9 +572,15 @@ mod tests {
     #[tokio::test]
     async fn test_glob_tool() {
         let temp = tempfile::tempdir().unwrap();
-        tokio::fs::write(temp.path().join("a.rs"), "").await.unwrap();
-        tokio::fs::write(temp.path().join("b.rs"), "").await.unwrap();
-        tokio::fs::write(temp.path().join("c.txt"), "").await.unwrap();
+        tokio::fs::write(temp.path().join("a.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("b.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("c.txt"), "")
+            .await
+            .unwrap();
         let tool = GlobTool;
         let args = serde_json::json!({
             "pattern": "*.rs",
@@ -504,8 +600,12 @@ mod tests {
     #[tokio::test]
     async fn test_grep_tool() {
         let temp = tempfile::tempdir().unwrap();
-        tokio::fs::write(temp.path().join("a.rs"), "fn main() {}\nfn helper() {}").await.unwrap();
-        tokio::fs::write(temp.path().join("b.txt"), "fn other() {}").await.unwrap();
+        tokio::fs::write(temp.path().join("a.rs"), "fn main() {}\nfn helper() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("b.txt"), "fn other() {}")
+            .await
+            .unwrap();
         let tool = GrepTool;
         let args = serde_json::json!({
             "pattern": "fn main",

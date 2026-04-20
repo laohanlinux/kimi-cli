@@ -5,11 +5,15 @@
 //! **Structured user turns:** `POST /turn` with a UTF-8 body (same formats as
 //! [`crate::turn_input::parse_cli_turn_line`]) queues one turn when the binary was started with
 //! `--acp` and a worker is running. `GET /turn` returns a small JSON hint. Requires
-//! `Content-Length` on POST bodies (max 256 KiB).
+//! `Content-Length` on POST bodies (see [`default_max_request_bytes`] / `RKI_ACP_MAX_REQUEST_BYTES`).
 //!
 //! Optional shared secret: **`RKI_ACP_TOKEN`**. When set, **`POST /turn`** and **`GET /events`**
 //! require `Authorization: Bearer <token>`. **`GET /health`** and **`GET /turn`** (JSON hint)
 //! stay unauthenticated for local probes.
+//!
+//! **Request size:** each connection reads at most one buffer of `max_request_bytes` (default
+//! [`DEFAULT_MAX_REQUEST_BYTES`]). Override via **`RKI_ACP_MAX_REQUEST_BYTES`** (see
+//! [`default_max_request_bytes`]).
 
 use crate::wire::RootWireHub;
 use anyhow::Context;
@@ -27,7 +31,24 @@ fn sse_idle_timeout() -> Duration {
     }
 }
 
-const MAX_REQUEST: usize = 256 * 1024;
+/// Default cap for ACP HTTP read buffer (headers + body).
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 256 * 1024;
+
+fn sanitize_max_request_bytes(parsed: usize) -> usize {
+    parsed.clamp(4 * 1024, 16 * 1024 * 1024)
+}
+
+/// Max bytes for a single ACP HTTP request (headers + body). Env: `RKI_ACP_MAX_REQUEST_BYTES`.
+/// Values outside **4 KiB … 16 MiB** are clamped; invalid `parse` falls back to [`DEFAULT_MAX_REQUEST_BYTES`].
+pub fn default_max_request_bytes() -> usize {
+    match std::env::var("RKI_ACP_MAX_REQUEST_BYTES") {
+        Ok(s) => match s.trim().parse::<usize>() {
+            Ok(n) => sanitize_max_request_bytes(n),
+            Err(_) => DEFAULT_MAX_REQUEST_BYTES,
+        },
+        Err(_) => DEFAULT_MAX_REQUEST_BYTES,
+    }
+}
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
@@ -81,11 +102,18 @@ fn parse_content_length(headers: &str) -> Option<usize> {
     None
 }
 
-async fn read_until_double_crlf(stream: &mut TcpStream, buf: &mut Vec<u8>) -> anyhow::Result<usize> {
+async fn read_until_double_crlf(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    max_request: usize,
+) -> anyhow::Result<usize> {
     let mut tmp = [0u8; 4096];
-    while buf.len() < MAX_REQUEST {
+    loop {
         if let Some(pos) = find_double_crlf(buf) {
             return Ok(pos);
+        }
+        if buf.len() >= max_request {
+            anyhow::bail!("request headers exceed limit");
         }
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
@@ -93,7 +121,6 @@ async fn read_until_double_crlf(stream: &mut TcpStream, buf: &mut Vec<u8>) -> an
         }
         buf.extend_from_slice(&tmp[..n]);
     }
-    anyhow::bail!("request headers exceed limit")
 }
 
 async fn ensure_body(
@@ -101,10 +128,11 @@ async fn ensure_body(
     buf: &mut Vec<u8>,
     header_end: usize,
     content_len: usize,
+    max_request: usize,
 ) -> anyhow::Result<()> {
     let need = header_end + 4 + content_len;
     let mut tmp = [0u8; 4096];
-    while buf.len() < need && buf.len() < MAX_REQUEST {
+    while buf.len() < need && buf.len() < max_request {
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
             anyhow::bail!("connection closed before full body");
@@ -144,6 +172,8 @@ pub struct AcpServer {
     turn_tx: Option<mpsc::Sender<String>>,
     /// When set, `POST /turn` and `GET /events` require `Authorization: Bearer <token>`.
     auth_token: Option<String>,
+    /// Upper bound for reading one HTTP request (headers + body).
+    max_request_bytes: usize,
 }
 
 #[allow(dead_code)]
@@ -153,12 +183,14 @@ impl AcpServer {
         port: u16,
         turn_tx: Option<mpsc::Sender<String>>,
         auth_token: Option<String>,
+        max_request_bytes: usize,
     ) -> Self {
         Self {
             hub,
             port,
             turn_tx,
             auth_token,
+            max_request_bytes,
         }
     }
 
@@ -169,6 +201,7 @@ impl AcpServer {
         let hub = self.hub.clone();
         let turn_tx = self.turn_tx.clone();
         let auth_token = self.auth_token.clone();
+        let max_request_bytes = self.max_request_bytes;
 
         loop {
             let (stream, addr) = listener.accept().await?;
@@ -176,7 +209,9 @@ impl AcpServer {
             let turn_tx = turn_tx.clone();
             let auth_token = auth_token.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, hub, turn_tx, auth_token).await {
+                if let Err(e) =
+                    handle_connection(stream, hub, turn_tx, auth_token, max_request_bytes).await
+                {
                     tracing::debug!("ACP connection from {} error: {}", addr, e);
                 }
             });
@@ -202,9 +237,10 @@ async fn handle_connection(
     hub: RootWireHub,
     turn_tx: Option<mpsc::Sender<String>>,
     auth_token: Option<String>,
+    max_request: usize,
 ) -> anyhow::Result<()> {
     let mut buf = Vec::new();
-    let header_end = read_until_double_crlf(&mut stream, &mut buf).await?;
+    let header_end = read_until_double_crlf(&mut stream, &mut buf, max_request).await?;
     let head = std::str::from_utf8(&buf[..header_end]).context("request headers not utf-8")?;
     let first = head.lines().next().unwrap_or("").trim();
     let parts: Vec<&str> = first.split_whitespace().collect();
@@ -246,7 +282,7 @@ async fn handle_connection(
             return Ok(());
         }
         let cl = parse_content_length(head).context("POST /turn requires Content-Length header")?;
-        if cl > MAX_REQUEST.saturating_sub(header_end + 4) {
+        if cl > max_request.saturating_sub(header_end + 4) {
             write_http_response(
                 &mut stream,
                 "413 Payload Too Large",
@@ -256,7 +292,7 @@ async fn handle_connection(
             .await?;
             return Ok(());
         }
-        ensure_body(&mut stream, &mut buf, header_end, cl).await?;
+        ensure_body(&mut stream, &mut buf, header_end, cl, max_request).await?;
         let body_bytes = &buf[header_end + 4..header_end + 4 + cl];
         let body_str = String::from_utf8_lossy(body_bytes).trim().to_string();
 
@@ -328,7 +364,10 @@ Transfer-Encoding: chunked\r\n\
                 Ok(Ok(envelope)) => {
                     if let Ok(json) = serde_json::to_string(&envelope) {
                         let sse = format!("data: {}\n\n", json);
-                        if write_chunk_frame(&mut stream, sse.as_bytes()).await.is_err() {
+                        if write_chunk_frame(&mut stream, sse.as_bytes())
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                         let _ = stream.flush().await;
@@ -340,7 +379,10 @@ Transfer-Encoding: chunked\r\n\
                     break;
                 }
                 Err(_) => {
-                    if write_chunk_frame(&mut stream, b": keepalive\n\n").await.is_err() {
+                    if write_chunk_frame(&mut stream, b": keepalive\n\n")
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     let _ = stream.flush().await;
@@ -364,28 +406,28 @@ mod tests {
     #[tokio::test]
     async fn test_acp_server_creation() {
         let hub = RootWireHub::new();
-        let server = AcpServer::new(hub, 0, None, None);
+        let server = AcpServer::new(hub, 0, None, None, DEFAULT_MAX_REQUEST_BYTES);
         assert_eq!(server.port, 0);
     }
 
     #[tokio::test]
     async fn test_acp_server_health_response_format() {
         let hub = RootWireHub::new();
-        let server = AcpServer::new(hub, 0, None, None);
+        let server = AcpServer::new(hub, 0, None, None, DEFAULT_MAX_REQUEST_BYTES);
         assert_eq!(server.port, 0);
     }
 
     #[tokio::test]
     async fn test_acp_server_non_zero_port() {
         let hub = RootWireHub::new();
-        let server = AcpServer::new(hub, 8080, None, None);
+        let server = AcpServer::new(hub, 8080, None, None, DEFAULT_MAX_REQUEST_BYTES);
         assert_eq!(server.port, 8080);
     }
 
     #[tokio::test]
     async fn test_acp_server_clone_hub() {
         let hub = RootWireHub::new();
-        let server = AcpServer::new(hub.clone(), 3000, None, None);
+        let server = AcpServer::new(hub.clone(), 3000, None, None, DEFAULT_MAX_REQUEST_BYTES);
         assert_eq!(server.port, 3000);
     }
 
@@ -401,7 +443,9 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream, hub, None, None).await.unwrap();
+            handle_connection(stream, hub, None, None, DEFAULT_MAX_REQUEST_BYTES)
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -430,7 +474,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<String>(1);
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream, hub, Some(tx), None).await.unwrap();
+            handle_connection(stream, hub, Some(tx), None, DEFAULT_MAX_REQUEST_BYTES)
+                .await
+                .unwrap();
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
@@ -458,7 +504,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream, hub, Some(tx), None).await.unwrap();
+            handle_connection(stream, hub, Some(tx), None, DEFAULT_MAX_REQUEST_BYTES)
+                .await
+                .unwrap();
         });
         let body = r#"{"text":"hello-acp"}"#;
         let req = format!(
@@ -491,7 +539,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let _ = handle_connection(stream, hub, None, None).await;
+            let _ = handle_connection(stream, hub, None, None, DEFAULT_MAX_REQUEST_BYTES).await;
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -508,7 +556,12 @@ mod tests {
         let mut buf = vec![0u8; 8192];
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         while accumulated.len() < 64 * 1024 && tokio::time::Instant::now() < deadline {
-            let n = match tokio::time::timeout(std::time::Duration::from_millis(400), client.read(&mut buf)).await {
+            let n = match tokio::time::timeout(
+                std::time::Duration::from_millis(400),
+                client.read(&mut buf),
+            )
+            .await
+            {
                 Ok(Ok(n)) => n,
                 Ok(Err(e)) => panic!("read: {e}"),
                 Err(_) => continue,
@@ -526,8 +579,92 @@ mod tests {
         assert!(text.contains("Transfer-Encoding: chunked"), "{}", text);
         assert!(text.contains("text/event-stream"), "{}", text);
         assert!(text.contains("data: "), "{}", text);
-        assert!(text.contains("turn_end") || text.contains("TurnEnd"), "{}", text);
+        assert!(
+            text.contains("turn_end") || text.contains("TurnEnd"),
+            "{}",
+            text
+        );
 
+        drop(client);
+        let _ = server.await;
+    }
+
+    #[test]
+    fn test_sanitize_max_request_bytes() {
+        assert_eq!(sanitize_max_request_bytes(100), 4 * 1024);
+        assert_eq!(sanitize_max_request_bytes(4 * 1024), 4 * 1024);
+        assert_eq!(sanitize_max_request_bytes(50_000), 50_000);
+        assert_eq!(
+            sanitize_max_request_bytes(32 * 1024 * 1024),
+            16 * 1024 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn test_acp_post_turn_413_when_content_length_exceeds_cap() {
+        let hub = RootWireHub::new();
+        let (tx, _rx) = mpsc::channel::<String>(1);
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("bind failed: {e}"),
+        };
+        let addr = listener.local_addr().unwrap();
+        // Small cap: headers must still fit (~80 B); body declared larger than remaining budget → 413.
+        let max = 512usize;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(stream, hub, Some(tx), None, max)
+                .await
+                .unwrap();
+        });
+        let body = "x".repeat(500);
+        let req = format!(
+            "POST /turn HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 512];
+        let n = client.read(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf[..n]);
+        assert!(text.contains("413"), "{text}");
+        drop(client);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_acp_post_turn_accepts_body_under_custom_cap() {
+        let hub = RootWireHub::new();
+        let (tx, mut rx) = mpsc::channel::<String>(1);
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("bind failed: {e}"),
+        };
+        let addr = listener.local_addr().unwrap();
+        let max = 512usize;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_connection(stream, hub, Some(tx), None, max)
+                .await
+                .unwrap();
+        });
+        let body = "y".repeat(350);
+        let req = format!(
+            "POST /turn HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 512];
+        let n = client.read(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf[..n]);
+        assert!(text.contains("202"), "{text}");
+        let got = rx.recv().await.expect("queued");
+        assert_eq!(got.len(), 350);
         drop(client);
         let _ = server.await;
     }
@@ -542,7 +679,10 @@ mod tests {
             parse_authorization_bearer("authorization: BeArEr tok\r\n"),
             Some("tok".to_string())
         );
-        assert_eq!(parse_authorization_bearer("GET /x HTTP/1.1\r\nHost: a\r\n"), None);
+        assert_eq!(
+            parse_authorization_bearer("GET /x HTTP/1.1\r\nHost: a\r\n"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -557,9 +697,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream, hub, Some(tx), Some("sekrit".into()))
-                .await
-                .unwrap();
+            handle_connection(
+                stream,
+                hub,
+                Some(tx),
+                Some("sekrit".into()),
+                DEFAULT_MAX_REQUEST_BYTES,
+            )
+            .await
+            .unwrap();
         });
         let body = r#"{"text":"x"}"#;
         let req = format!(
@@ -589,9 +735,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream, hub, Some(tx), Some("good".into()))
-                .await
-                .unwrap();
+            handle_connection(
+                stream,
+                hub,
+                Some(tx),
+                Some("good".into()),
+                DEFAULT_MAX_REQUEST_BYTES,
+            )
+            .await
+            .unwrap();
         });
         let body = r#"{"text":"authed"}"#;
         let req = format!(
@@ -622,7 +774,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream, hub, None, Some("tok".into())).await.unwrap();
+            handle_connection(
+                stream,
+                hub,
+                None,
+                Some("tok".into()),
+                DEFAULT_MAX_REQUEST_BYTES,
+            )
+            .await
+            .unwrap();
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         client

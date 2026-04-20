@@ -91,13 +91,25 @@ impl WireEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEvent {
-    TurnBegin { user_input: UserInput },
+    TurnBegin {
+        user_input: UserInput,
+    },
     TurnEnd,
     /// Process or UI session is shutting down (§1.2 L35); typically followed by [`WireEvent::TurnEnd`].
-    SessionShutdown { reason: String },
-    StepBegin { n: usize },
-    StepInterrupted { reason: String },
-    SteerInput { content: String },
+    SessionShutdown {
+        reason: String,
+    },
+    StepBegin {
+        n: usize,
+    },
+    StepInterrupted {
+        reason: String,
+    },
+    /// Python `SteerInput` uses `user_input`; alias `content` for older Rust JSON.
+    SteerInput {
+        #[serde(rename = "user_input", alias = "content")]
+        content: String,
+    },
     CompactionBegin,
     CompactionEnd,
     StatusUpdate {
@@ -106,16 +118,38 @@ pub enum WireEvent {
         plan_mode: bool,
         mcp_status: String,
     },
+    /// JSON `type`: `mcp_loading_begin` (stable). Alias `m_c_p_loading_begin` for legacy serde snake_case.
+    #[serde(rename = "mcp_loading_begin", alias = "m_c_p_loading_begin")]
     MCPLoadingBegin,
+    #[serde(rename = "mcp_loading_end", alias = "m_c_p_loading_end")]
     MCPLoadingEnd,
-    MCPStatusSnapshot { servers: Vec<String> },
-    TextPart { text: String },
-    ThinkPart { text: String },
-    ImageUrlPart { url: String },
-    AudioUrlPart { url: String },
-    VideoUrlPart { url: String },
-    ToolCall { id: String, function: FunctionCall },
-    ToolCallPart { id: String, partial: String },
+    #[serde(rename = "mcp_status_snapshot", alias = "m_c_p_status_snapshot")]
+    MCPStatusSnapshot {
+        servers: Vec<String>,
+    },
+    TextPart {
+        text: String,
+    },
+    ThinkPart {
+        text: String,
+    },
+    ImageUrlPart {
+        url: String,
+    },
+    AudioUrlPart {
+        url: String,
+    },
+    VideoUrlPart {
+        url: String,
+    },
+    ToolCall {
+        id: String,
+        function: FunctionCall,
+    },
+    ToolCallPart {
+        id: String,
+        partial: String,
+    },
     ToolResult {
         tool_call_id: String,
         output: String,
@@ -137,23 +171,117 @@ pub enum WireEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         feedback: Option<String>,
     },
-    QuestionRequest { id: String, questions: Vec<Question> },
-    QuestionResponse { id: String, answers: Vec<String> },
+    QuestionRequest {
+        id: String,
+        questions: Vec<Question>,
+    },
+    QuestionResponse {
+        id: String,
+        answers: Vec<String>,
+    },
+    /// Python `Notification` (flat `WireEvent` uses `kind` for the notification `type` string —
+    /// the JSON key remains `kind` because `type` is reserved for the serde enum tag).
     Notification {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        id: String,
         category: String,
         kind: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source_kind: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source_id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        title: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        body: String,
         severity: String,
+        #[serde(default, skip_serializing_if = "is_zero_f64")]
+        created_at: f64,
+        #[serde(default = "default_json_object")]
         payload: serde_json::Value,
     },
-    PlanDisplay { content: String },
-    BtwBegin,
-    BtwEnd,
-    HookTriggered,
-    HookResolved,
+    /// Inline plan markdown (Python `PlanDisplay`: `content` + `file_path`).
+    PlanDisplay {
+        content: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        file_path: String,
+    },
+    /// Python `BtwBegin` (/btw side question started).
+    BtwBegin {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        question: String,
+    },
+    /// Python `BtwEnd`.
+    BtwEnd {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Python `HookTriggered` (batch hooks).
+    HookTriggered {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        event: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        target: String,
+        #[serde(
+            default = "default_hook_count",
+            skip_serializing_if = "is_default_hook_count"
+        )]
+        hook_count: u32,
+    },
+    /// Python `HookResolved`.
+    HookResolved {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        event: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        target: String,
+        #[serde(
+            default = "default_hook_action_allow",
+            skip_serializing_if = "is_default_hook_action"
+        )]
+        action: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reason: String,
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        duration_ms: u64,
+    },
+}
+
+fn default_hook_count() -> u32 {
+    1
+}
+
+fn is_default_hook_count(n: &u32) -> bool {
+    *n == 1
+}
+
+fn default_hook_action_allow() -> String {
+    "allow".to_string()
+}
+
+fn is_default_hook_action(s: &String) -> bool {
+    s == "allow"
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+fn is_zero_f64(n: &f64) -> bool {
+    *n == 0.0
+}
+
+fn default_json_object() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 impl WireEvent {
-    /// Snake-case `type` tag used in JSON and in `wire_events.event_type` (matches `serde` externally-tagged shape).
+    /// `type` tag string for JSON and `wire_events.event_type` (matches `serde` for this enum).
     pub fn serde_type_key(&self) -> String {
         serde_json::to_value(self)
             .ok()
@@ -201,7 +329,10 @@ impl Wire {
     pub fn new(capacity: usize) -> Self {
         let (sender, _) = tokio::sync::broadcast::channel(capacity);
         let (merged_sender, _) = tokio::sync::broadcast::channel(capacity);
-        Self { sender, merged_sender }
+        Self {
+            sender,
+            merged_sender,
+        }
     }
 
     pub fn send(&self, event: WireEvent) {
@@ -277,7 +408,10 @@ impl MergedWireReceiver {
     }
 
     fn is_mergeable(event: &WireEvent) -> bool {
-        matches!(event, WireEvent::TextPart { .. } | WireEvent::ThinkPart { .. })
+        matches!(
+            event,
+            WireEvent::TextPart { .. } | WireEvent::ThinkPart { .. }
+        )
     }
 
     fn try_merge(&mut self, event: WireEvent) -> Option<WireEvent> {
@@ -322,8 +456,12 @@ mod tests {
         let raw_rx = wire.subscribe();
         let mut merged = MergedWireReceiver::new(raw_rx);
 
-        wire.send(WireEvent::TextPart { text: "Hello ".to_string() });
-        wire.send(WireEvent::TextPart { text: "world".to_string() });
+        wire.send(WireEvent::TextPart {
+            text: "Hello ".to_string(),
+        });
+        wire.send(WireEvent::TextPart {
+            text: "world".to_string(),
+        });
         wire.send(WireEvent::TurnEnd);
         drop(wire); // close channel to trigger final flush
 
@@ -340,9 +478,15 @@ mod tests {
         let raw_rx = wire.subscribe();
         let mut merged = MergedWireReceiver::new(raw_rx);
 
-        wire.send(WireEvent::ThinkPart { text: "A".to_string() });
-        wire.send(WireEvent::ThinkPart { text: "B".to_string() });
-        wire.send(WireEvent::ThinkPart { text: "C".to_string() });
+        wire.send(WireEvent::ThinkPart {
+            text: "A".to_string(),
+        });
+        wire.send(WireEvent::ThinkPart {
+            text: "B".to_string(),
+        });
+        wire.send(WireEvent::ThinkPart {
+            text: "C".to_string(),
+        });
         wire.send(WireEvent::StepBegin { n: 1 });
         drop(wire);
 
@@ -359,7 +503,9 @@ mod tests {
         let raw_rx = wire.subscribe();
         let mut merged = MergedWireReceiver::new(raw_rx);
 
-        wire.send(WireEvent::TextPart { text: "leftover".to_string() });
+        wire.send(WireEvent::TextPart {
+            text: "leftover".to_string(),
+        });
         wire.send(WireEvent::TurnEnd);
         drop(wire);
 
@@ -386,7 +532,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_wire_envelope_source() {
-        let env = WireEnvelope::new(WireEvent::TurnEnd).with_source(EventSource::subagent("sa1".to_string(), Some("tc-1".to_string())));
+        let env = WireEnvelope::new(WireEvent::TurnEnd).with_source(EventSource::subagent(
+            "sa1".to_string(),
+            Some("tc-1".to_string()),
+        ));
         assert_eq!(env.source.agent_id, Some("sa1".to_string()));
         assert!(env.is_subagent_event());
     }
@@ -407,6 +556,151 @@ mod tests {
         let back: WireEvent = serde_json::from_str(&s).unwrap();
         assert!(
             matches!(&back, WireEvent::SessionShutdown { reason } if reason == "interactive_exit"),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_wire_events_serialize_stable_type_names() {
+        let begin = WireEvent::MCPLoadingBegin;
+        assert_eq!(begin.serde_type_key(), "mcp_loading_begin");
+        let json = serde_json::to_string(&begin).unwrap();
+        assert!(json.contains("\"type\":\"mcp_loading_begin\""), "{json}");
+
+        let snap = WireEvent::MCPStatusSnapshot {
+            servers: vec!["a".into()],
+        };
+        assert_eq!(snap.serde_type_key(), "mcp_status_snapshot");
+    }
+
+    #[test]
+    fn test_mcp_wire_events_deserialize_legacy_m_c_p_type_aliases() {
+        let old: WireEvent = serde_json::from_str(r#"{"type":"m_c_p_loading_begin"}"#).unwrap();
+        assert!(matches!(old, WireEvent::MCPLoadingBegin));
+
+        let snap: WireEvent =
+            serde_json::from_str(r#"{"type":"m_c_p_status_snapshot","servers":["x"]}"#).unwrap();
+        assert!(
+            matches!(snap, WireEvent::MCPStatusSnapshot { servers } if servers == vec!["x".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_steer_input_serializes_user_input_key() {
+        let ev = WireEvent::SteerInput {
+            content: "hello".into(),
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        assert!(j.contains("\"user_input\":\"hello\""), "{j}");
+        let back: WireEvent = serde_json::from_str(&j).unwrap();
+        assert!(
+            matches!(&back, WireEvent::SteerInput { content } if content == "hello"),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn test_steer_input_deserializes_legacy_content_key() {
+        let ev: WireEvent =
+            serde_json::from_str(r#"{"type":"steer_input","content":"legacy"}"#).unwrap();
+        assert!(
+            matches!(&ev, WireEvent::SteerInput { content } if content == "legacy"),
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn test_plan_display_file_path_optional() {
+        let ev: WireEvent =
+            serde_json::from_str(r#"{"type":"plan_display","content":"body only"}"#).unwrap();
+        assert!(
+            matches!(&ev, WireEvent::PlanDisplay { content, file_path }
+                if content == "body only" && file_path.is_empty()),
+            "{ev:?}"
+        );
+        let with_path: WireEvent = serde_json::from_str(
+            r#"{"type":"plan_display","content":"c","file_path":"/tmp/p.md"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&with_path, WireEvent::PlanDisplay { file_path, .. } if file_path == "/tmp/p.md"),
+            "{with_path:?}"
+        );
+    }
+
+    #[test]
+    fn test_notification_deserialize_legacy_shape() {
+        let ev: WireEvent = serde_json::from_str(
+            r#"{"type":"notification","category":"c","kind":"k","severity":"info","payload":{}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &ev,
+                WireEvent::Notification {
+                    id,
+                    category,
+                    kind,
+                    severity,
+                    created_at,
+                    ..
+                } if id.is_empty() && category == "c" && kind == "k" && severity == "info" && *created_at == 0.0
+            ),
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn test_btw_begin_end_minimal_and_full() {
+        let min_b: WireEvent = serde_json::from_str(r#"{"type":"btw_begin"}"#).unwrap();
+        assert!(
+            matches!(&min_b, WireEvent::BtwBegin { id, question } if id.is_empty() && question.is_empty()),
+            "{min_b:?}"
+        );
+        let j = serde_json::to_string(&min_b).unwrap();
+        assert_eq!(j, r#"{"type":"btw_begin"}"#);
+
+        let end: WireEvent =
+            serde_json::from_str(r#"{"type":"btw_end","id":"x","response":"done","error":null}"#)
+                .unwrap();
+        assert!(
+            matches!(&end, WireEvent::BtwEnd { id, response, error } if id == "x" && response.as_deref() == Some("done") && error.is_none()),
+            "{end:?}"
+        );
+    }
+
+    #[test]
+    fn test_hook_triggered_resolved_serde() {
+        let minimal: WireEvent = serde_json::from_str(r#"{"type":"hook_triggered"}"#).unwrap();
+        assert!(
+            matches!(
+                &minimal,
+                WireEvent::HookTriggered { event, target, hook_count }
+                    if event.is_empty() && target.is_empty() && *hook_count == 1
+            ),
+            "{minimal:?}"
+        );
+        let j = serde_json::to_string(&minimal).unwrap();
+        assert_eq!(j, r#"{"type":"hook_triggered"}"#);
+
+        let full = WireEvent::HookResolved {
+            event: "Stop".into(),
+            target: "agent".into(),
+            action: "block".into(),
+            reason: "nope".into(),
+            duration_ms: 9,
+        };
+        let jf = serde_json::to_string(&full).unwrap();
+        let back: WireEvent = serde_json::from_str(&jf).unwrap();
+        assert!(
+            matches!(
+                &back,
+                WireEvent::HookResolved {
+                    action,
+                    duration_ms,
+                    ..
+                } if action == "block" && *duration_ms == 9
+            ),
             "{back:?}"
         );
     }

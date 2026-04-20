@@ -30,8 +30,6 @@ impl<T: ConfigSubscriber> ConfigSubscriber for Arc<T> {
     }
 }
 
-
-
 /// Propagates config changes to registered subscribers per section (§8.7 deviation).
 /// Only notifies subscribers whose section actually changed.
 pub struct ConfigChangePropagator {
@@ -51,11 +49,7 @@ impl ConfigChangePropagator {
 
     /// Register a subscriber for a specific config section.
     /// Sections: `model`, `loop_control`, `trust_profile`, `orchestrator`, `providers`, `compaction`, `mcp` (§8.7).
-    pub fn subscribe(
-        &self,
-        section: &str,
-        subscriber: Box<dyn ConfigSubscriber>,
-    ) {
+    pub fn subscribe(&self, section: &str, subscriber: Box<dyn ConfigSubscriber>) {
         let mut subs = self.subscribers.lock().unwrap();
         subs.entry(section.to_string())
             .or_default()
@@ -111,7 +105,8 @@ impl ConfigChangePropagator {
         if old.ralph_max_iterations != new.ralph_max_iterations {
             changed.insert("orchestrator".to_string());
         }
-        if (old.compaction_threshold_percent - new.compaction_threshold_percent).abs() > f64::EPSILON
+        if (old.compaction_threshold_percent - new.compaction_threshold_percent).abs()
+            > f64::EPSILON
             || old.compaction_threshold_absolute != new.compaction_threshold_absolute
             || old.compaction_min_messages != new.compaction_min_messages
         {
@@ -142,10 +137,7 @@ pub struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
-    pub fn new(
-        path: &Path,
-        propagator: Arc<ConfigChangePropagator>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(path: &Path, propagator: Arc<ConfigChangePropagator>) -> anyhow::Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = RecommendedWatcher::new(tx, NotifyConfig::default())?;
         watcher.watch(path, RecursiveMode::NonRecursive)?;
@@ -157,9 +149,10 @@ impl ConfigWatcher {
                         event.kind,
                         notify::EventKind::Modify(_) | notify::EventKind::Create(_)
                     )
-                        && let Err(e) = propagator.check_and_notify() {
-                            tracing::warn!("Config change propagation failed: {}", e);
-                        }
+                    && let Err(e) = propagator.check_and_notify()
+                {
+                    tracing::warn!("Config change propagation failed: {}", e);
+                }
             }
         });
         Ok(Self { _watcher: watcher })
@@ -325,7 +318,9 @@ max_context_size = 128000
         )
         .unwrap();
 
-        let initial = crate::config_registry::parse_config_file(&config_path).unwrap().to_legacy_config();
+        let initial = crate::config_registry::parse_config_file(&config_path)
+            .unwrap()
+            .to_legacy_config();
         let propagator = ConfigChangePropagator::new(config_path.clone(), Some(initial));
 
         let subscriber = Arc::new(MockSubscriber::new());
@@ -346,7 +341,10 @@ max_context_size = 128000
         .unwrap();
 
         propagator.check_and_notify().unwrap();
-        assert!(subscriber.was_triggered(), "Subscriber should have been notified");
+        assert!(
+            subscriber.was_triggered(),
+            "Subscriber should have been notified"
+        );
     }
 
     #[test]
@@ -366,7 +364,9 @@ max_context_size = 128000
         )
         .unwrap();
 
-        let initial = crate::config_registry::parse_config_file(&config_path).unwrap().to_legacy_config();
+        let initial = crate::config_registry::parse_config_file(&config_path)
+            .unwrap()
+            .to_legacy_config();
         let propagator = ConfigChangePropagator::new(config_path.clone(), Some(initial));
 
         let model_sub = Arc::new(MockSubscriber::new());
@@ -410,7 +410,9 @@ max_context_size = 128000
         )
         .unwrap();
 
-        let initial = crate::config_registry::parse_config_file(&config_path).unwrap().to_legacy_config();
+        let initial = crate::config_registry::parse_config_file(&config_path)
+            .unwrap()
+            .to_legacy_config();
         let propagator = ConfigChangePropagator::new(config_path.clone(), Some(initial));
 
         let subscriber = Arc::new(MockSubscriber::new());

@@ -2,7 +2,7 @@
 //!
 //! `PrintUI` renders wire events to a string for non-interactive use.
 
-use crate::wire::{Wire, WireEvent, WireEnvelope, MergedWireReceiver};
+use crate::wire::{MergedWireReceiver, Wire, WireEnvelope, WireEvent};
 
 /// Print-mode UI: non-interactive, renders wire events to stdout.
 #[allow(dead_code)]
@@ -35,9 +35,17 @@ impl PrintUI {
             TextPart { text } => output.push_str(text),
             ThinkPart { text } => output.push_str(&format!("[thinking: {}]\n", text)),
             ToolCall { id, function } => {
-                output.push_str(&format!("\n[Tool {}] {}({})\n", id, function.name, function.arguments));
+                output.push_str(&format!(
+                    "\n[Tool {}] {}({})\n",
+                    id, function.name, function.arguments
+                ));
             }
-            ToolResult { tool_call_id, output: result, is_error, elapsed_ms } => {
+            ToolResult {
+                tool_call_id,
+                output: result,
+                is_error,
+                elapsed_ms,
+            } => {
                 output.push_str(&format!(
                     "[Result {}] error={} elapsed={:?}\n{}\n",
                     tool_call_id, is_error, elapsed_ms, result
@@ -51,7 +59,12 @@ impl PrintUI {
             }
             TurnEnd => output.push_str("\n---\n"),
             StepBegin { n } => output.push_str(&format!("\n[Step {}]\n", n)),
-            StatusUpdate { token_count, context_size, plan_mode, mcp_status } => {
+            StatusUpdate {
+                token_count,
+                context_size,
+                plan_mode,
+                mcp_status,
+            } => {
                 output.push_str(&format!(
                     "[Status] tokens={}/{} plan={} mcp={}\n",
                     token_count, context_size, plan_mode, mcp_status
@@ -71,19 +84,19 @@ mod tests {
         let wire = Wire::new(1024);
         let wire2 = wire.clone();
 
-        let handle = tokio::spawn(async move {
-            PrintUI::run(&wire2, "test").await.unwrap()
-        });
+        let handle = tokio::spawn(async move { PrintUI::run(&wire2, "test").await.unwrap() });
 
         // Give the subscriber time to register
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        wire.send(WireEvent::TextPart { text: "Hello".to_string() });
+        wire.send(WireEvent::TextPart {
+            text: "Hello".to_string(),
+        });
         wire.send(WireEvent::TurnEnd);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle
-        ).await.unwrap().unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(output.contains("Hello"));
     }
 
@@ -92,21 +105,22 @@ mod tests {
         let wire = Wire::new(1024);
         let wire2 = wire.clone();
 
-        let handle = tokio::spawn(async move {
-            PrintUI::run(&wire2, "test").await.unwrap()
-        });
+        let handle = tokio::spawn(async move { PrintUI::run(&wire2, "test").await.unwrap() });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         wire.send(WireEvent::ToolCall {
             id: "tc-1".to_string(),
-            function: crate::message::FunctionCall { name: "shell".to_string(), arguments: r#"{"command":"echo hi"}"#.to_string() },
+            function: crate::message::FunctionCall {
+                name: "shell".to_string(),
+                arguments: r#"{"command":"echo hi"}"#.to_string(),
+            },
         });
         wire.send(WireEvent::TurnEnd);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle
-        ).await.unwrap().unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(output.contains("shell"));
     }
 
@@ -115,18 +129,18 @@ mod tests {
         let wire = Wire::new(1024);
         let wire2 = wire.clone();
 
-        let handle = tokio::spawn(async move {
-            PrintUI::run(&wire2, "test").await.unwrap()
-        });
+        let handle = tokio::spawn(async move { PrintUI::run(&wire2, "test").await.unwrap() });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        wire.send(WireEvent::ThinkPart { text: "pondering".to_string() });
+        wire.send(WireEvent::ThinkPart {
+            text: "pondering".to_string(),
+        });
         wire.send(WireEvent::TurnEnd);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle
-        ).await.unwrap().unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(output.contains("thinking"));
     }
 
@@ -135,9 +149,8 @@ mod tests {
         let wire = Wire::new(1024);
         let wire2 = wire.clone();
 
-        let handle = tokio::spawn(async move {
-            PrintUI::run(&wire2, "hello world").await.unwrap()
-        });
+        let handle =
+            tokio::spawn(async move { PrintUI::run(&wire2, "hello world").await.unwrap() });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         wire.send(WireEvent::TurnBegin {
@@ -145,10 +158,10 @@ mod tests {
         });
         wire.send(WireEvent::TurnEnd);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle
-        ).await.unwrap().unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(output.contains("Turn"));
     }
 }

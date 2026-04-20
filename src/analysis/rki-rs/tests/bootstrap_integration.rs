@@ -4,9 +4,14 @@ use std::sync::Arc;
 #[tokio::test]
 async fn test_runtime_bootstrap_in_memory() {
     let hub = rki_rs::wire::RootWireHub::new();
-    let approval = Arc::new(rki_rs::approval::ApprovalRuntime::new(hub.clone(), true, vec![]));
+    let approval = Arc::new(rki_rs::approval::ApprovalRuntime::new(
+        hub.clone(),
+        true,
+        vec![],
+    ));
     let store = rki_rs::store::Store::open(std::path::Path::new(":memory:")).unwrap();
-    let session = rki_rs::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap();
+    let session =
+        rki_rs::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap();
 
     let config = rki_rs::config::Config {
         max_steps_per_turn: Some(100),
@@ -59,5 +64,8 @@ async fn test_wire_hub_broadcast_roundtrip() {
     });
 
     let envelope = rx.recv().await.unwrap();
-    assert!(matches!(envelope.event, rki_rs::wire::WireEvent::TurnBegin { .. }));
+    assert!(matches!(
+        envelope.event,
+        rki_rs::wire::WireEvent::TurnBegin { .. }
+    ));
 }

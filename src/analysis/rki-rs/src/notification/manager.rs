@@ -1,7 +1,23 @@
-use crate::notification::types::NotificationEvent;
-use crate::store::Store;
+use crate::notification::types::{NotificationEvent, notification_created_at_from_sqlite};
+use crate::store::{NotificationRecord, Store};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+fn notification_event_from_record(rec: NotificationRecord) -> NotificationEvent {
+    let payload = serde_json::from_str(&rec.payload).unwrap_or(serde_json::Value::Null);
+    NotificationEvent {
+        category: rec.category,
+        kind: rec.kind,
+        severity: rec.severity,
+        payload,
+        dedupe_key: Some(rec.id),
+        created_at: notification_created_at_from_sqlite(&rec.created_at),
+        title: rec.title,
+        body: rec.body,
+        source_kind: rec.source_kind,
+        source_id: rec.source_id,
+    }
+}
 
 /// In-memory deduplication filter for notification publish.
 ///
@@ -41,7 +57,10 @@ impl NotificationManager {
         if let Some(key) = dedupe_key
             && self.store.has_notification_dedupe(&self.session_id, key)?
         {
-            self.seen_dedupe_keys.lock().unwrap().insert(key.to_string());
+            self.seen_dedupe_keys
+                .lock()
+                .unwrap()
+                .insert(key.to_string());
             return Ok(None);
         }
 
@@ -55,10 +74,17 @@ impl NotificationManager {
             &event.severity,
             &payload,
             dedupe_key,
+            &event.title,
+            &event.body,
+            &event.source_kind,
+            &event.source_id,
         )?;
 
         if let Some(key) = dedupe_key {
-            self.seen_dedupe_keys.lock().unwrap().insert(key.to_string());
+            self.seen_dedupe_keys
+                .lock()
+                .unwrap()
+                .insert(key.to_string());
         }
 
         Ok(Some(id))
@@ -73,17 +99,7 @@ impl NotificationManager {
         match self.store.claim_notifications(&self.session_id, sink, 100) {
             Ok(rows) => rows
                 .into_iter()
-                .map(|(id, category, kind, severity, payload)| {
-                    let payload =
-                        serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
-                    NotificationEvent {
-                        category,
-                        kind,
-                        severity,
-                        payload,
-                        dedupe_key: Some(id),
-                    }
-                })
+                .map(notification_event_from_record)
                 .collect(),
             Err(_) => Vec::new(),
         }
@@ -104,7 +120,9 @@ impl NotificationManager {
     /// Claims older than `stale_after_ms` that have not been acked are
     /// deleted, allowing the associated notifications to be re-claimed.
     pub async fn recover_stale_claims(&self, stale_after_ms: i64) -> Vec<String> {
-        self.store.recover_stale_claims(stale_after_ms).unwrap_or_default()
+        self.store
+            .recover_stale_claims(stale_after_ms)
+            .unwrap_or_default()
     }
 
     /// Subscribe as a consumer group member, returning events after the
@@ -118,19 +136,10 @@ impl NotificationManager {
             .store
             .claim_notifications(&self.session_id, consumer_id, limit)?;
 
-        let mut results = Vec::new();
-        for (id, category, kind, severity, payload) in rows {
-            let payload = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
-            results.push(NotificationEvent {
-                category,
-                kind,
-                severity,
-                payload,
-                dedupe_key: Some(id),
-            });
-        }
-
-        Ok(results)
+        Ok(rows
+            .into_iter()
+            .map(notification_event_from_record)
+            .collect())
     }
 
     /// §8.4 offset tail: notifications newer than the persisted offset for `consumer_id` (no claim rows).
@@ -142,23 +151,12 @@ impl NotificationManager {
         let after = self
             .store
             .get_notification_offset(consumer_id, &self.session_id)?;
-        let rows = self.store.list_notifications_after(
-            &self.session_id,
-            after.as_deref(),
-            limit,
-        )?;
+        let rows =
+            self.store
+                .list_notifications_after(&self.session_id, after.as_deref(), limit)?;
         Ok(rows
             .into_iter()
-            .map(|(id, category, kind, severity, payload)| {
-                let payload = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
-                NotificationEvent {
-                    category,
-                    kind,
-                    severity,
-                    payload,
-                    dedupe_key: Some(id),
-                }
-            })
+            .map(notification_event_from_record)
             .collect())
     }
 
@@ -192,6 +190,7 @@ mod tests {
             severity: "info".to_string(),
             payload: serde_json::json!({"msg": "hello"}),
             dedupe_key: None,
+            ..Default::default()
         };
         let id = mgr.publish(event.clone()).await.unwrap();
         assert!(id.is_some());
@@ -210,6 +209,7 @@ mod tests {
             severity: "info".to_string(),
             payload: serde_json::json!({"id": "t1"}),
             dedupe_key: Some("dup-key-1".to_string()),
+            ..Default::default()
         };
 
         let id1 = mgr.publish(event.clone()).await.unwrap();
@@ -232,6 +232,7 @@ mod tests {
                 severity: "info".to_string(),
                 payload: serde_json::json!({"i": i}),
                 dedupe_key: None,
+                ..Default::default()
             };
             mgr.publish(event).await.unwrap();
         }
@@ -259,6 +260,7 @@ mod tests {
                 severity: "info".to_string(),
                 payload: serde_json::json!({"i": i}),
                 dedupe_key: None,
+                ..Default::default()
             };
             mgr.publish(event).await.unwrap();
         }
@@ -285,6 +287,7 @@ mod tests {
             severity: "info".to_string(),
             payload: serde_json::json!({"x": 1}),
             dedupe_key: None,
+            ..Default::default()
         };
         mgr.publish(event).await.unwrap();
 
@@ -332,6 +335,7 @@ mod tests {
                 severity: "info".to_string(),
                 payload: serde_json::json!({"i": i}),
                 dedupe_key: None,
+                ..Default::default()
             };
             let id = mgr.publish(event).await.unwrap();
             assert!(id.is_some());
@@ -351,6 +355,7 @@ mod tests {
                 severity: "info".to_string(),
                 payload: serde_json::json!({"i": i}),
                 dedupe_key: None,
+                ..Default::default()
             };
             mgr.publish(event).await.unwrap();
         }
@@ -377,7 +382,12 @@ mod tests {
                 kind: "a".to_string(),
                 severity: "info".to_string(),
                 payload: serde_json::json!({}),
+                title: "alpha".to_string(),
+                body: "body-a".to_string(),
+                source_kind: "src".to_string(),
+                source_id: "sid-1".to_string(),
                 dedupe_key: None,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -388,6 +398,7 @@ mod tests {
             severity: "info".to_string(),
             payload: serde_json::json!({}),
             dedupe_key: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -398,6 +409,7 @@ mod tests {
                 severity: "info".to_string(),
                 payload: serde_json::json!({}),
                 dedupe_key: None,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -405,6 +417,14 @@ mod tests {
 
         let all = mgr.read_since_persisted_offset("ui", 10).await.unwrap();
         assert_eq!(all.len(), 3);
+        assert_eq!(all[0].title, "alpha");
+        assert_eq!(all[0].body, "body-a");
+        assert_eq!(all[0].source_kind, "src");
+        assert_eq!(all[0].source_id, "sid-1");
+        assert!(
+            all.iter().all(|n| n.created_at.is_some()),
+            "SQLite created_at should surface on offset tail reads"
+        );
 
         mgr.advance_consumer_offset("ui", &id_a).await.unwrap();
         let tail = mgr.read_since_persisted_offset("ui", 10).await.unwrap();

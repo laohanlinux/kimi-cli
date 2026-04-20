@@ -6,8 +6,8 @@
 pub mod anthropic;
 pub mod openai;
 
-use async_trait::async_trait;
 use crate::message::{ContentPart, Message, ToolCall};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait ChatProvider: Send + Sync {
@@ -33,8 +33,16 @@ pub struct HttpGeneration {
 }
 
 impl HttpGeneration {
-    pub fn new(chunks: Vec<ContentPart>, tool_calls: Vec<ToolCall>, usage: Option<(usize, usize)>) -> Self {
-        Self { chunks, tool_calls, usage }
+    pub fn new(
+        chunks: Vec<ContentPart>,
+        tool_calls: Vec<ToolCall>,
+        usage: Option<(usize, usize)>,
+    ) -> Self {
+        Self {
+            chunks,
+            tool_calls,
+            usage,
+        }
     }
 }
 
@@ -125,7 +133,13 @@ where
                     config.base_delay_ms * 2u64.pow(attempt as u32),
                     config.max_delay_ms,
                 );
-                tracing::warn!("LLM call failed (attempt {}/{}): {}. Retrying in {}ms...", attempt + 1, config.max_retries + 1, err_text, delay);
+                tracing::warn!(
+                    "LLM call failed (attempt {}/{}): {}. Retrying in {}ms...",
+                    attempt + 1,
+                    config.max_retries + 1,
+                    err_text,
+                    delay
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 last_error = Some(e);
             }
@@ -135,7 +149,11 @@ where
 }
 
 /// Create a provider using the identity layer for credential resolution.
-pub async fn create_provider(model: &str, identity: &crate::identity::IdentityManager, session_id: Option<String>) -> anyhow::Result<Box<dyn ChatProvider>> {
+pub async fn create_provider(
+    model: &str,
+    identity: &crate::identity::IdentityManager,
+    session_id: Option<String>,
+) -> anyhow::Result<Box<dyn ChatProvider>> {
     if model.starts_with("claude") {
         let api_key = resolve_key(identity, "ANTHROPIC_API_KEY", "KIMI_API_KEY").await?;
         let base_url = resolve_base_url("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
@@ -155,7 +173,11 @@ pub async fn create_provider(model: &str, identity: &crate::identity::IdentityMa
     }
 }
 
-async fn resolve_key(identity: &crate::identity::IdentityManager, primary: &str, fallback: &str) -> anyhow::Result<String> {
+async fn resolve_key(
+    identity: &crate::identity::IdentityManager,
+    primary: &str,
+    fallback: &str,
+) -> anyhow::Result<String> {
     if let Ok(Some(cred)) = identity.get_key(primary).await {
         return Ok(cred.value);
     }
@@ -165,15 +187,23 @@ async fn resolve_key(identity: &crate::identity::IdentityManager, primary: &str,
     // Final fallback: direct env var (for backward compat)
     for var in [primary, fallback] {
         if let Ok(val) = std::env::var(var)
-            && !val.is_empty() {
-                return Ok(val);
-            }
+            && !val.is_empty()
+        {
+            return Ok(val);
+        }
     }
-    anyhow::bail!("No API key found. Set {} or {} environment variable.", primary, fallback)
+    anyhow::bail!(
+        "No API key found. Set {} or {} environment variable.",
+        primary,
+        fallback
+    )
 }
 
 fn resolve_base_url(env_var: &str, default: &str) -> String {
-    std::env::var(env_var).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| default.to_string())
+    std::env::var(env_var)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 pub struct EchoProvider;
@@ -196,7 +226,6 @@ impl ChatProvider for EchoProvider {
     }
 }
 
-
 /// Deterministic provider that returns scripted responses based on prompt content.
 /// Used for testing orchestrators that need specific LLM responses.
 #[cfg(test)]
@@ -214,7 +243,11 @@ impl ScriptedProvider {
         }
     }
 
-    pub fn with_response(mut self, match_text: impl Into<String>, response: impl Into<String>) -> Self {
+    pub fn with_response(
+        mut self,
+        match_text: impl Into<String>,
+        response: impl Into<String>,
+    ) -> Self {
         self.responses.push((match_text.into(), response.into()));
         self
     }
@@ -270,7 +303,8 @@ mod tests {
                 }
                 Ok("success")
             }
-        }).await;
+        })
+        .await;
         assert!(result.is_ok());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
@@ -285,7 +319,8 @@ mod tests {
         let result = with_retry(&config, || async {
             let r: anyhow::Result<&str> = Err(anyhow::anyhow!("400 Bad Request"));
             r
-        }).await;
+        })
+        .await;
         assert!(result.is_err());
     }
 
@@ -293,14 +328,28 @@ mod tests {
     async fn test_http_generation_chunks() {
         let mut g = HttpGeneration::new(
             vec![
-                ContentPart::Text { text: "hello".to_string() },
-                ContentPart::Text { text: "world".to_string() },
+                ContentPart::Text {
+                    text: "hello".to_string(),
+                },
+                ContentPart::Text {
+                    text: "world".to_string(),
+                },
             ],
             vec![],
             Some((10, 20)),
         );
-        assert_eq!(g.next_chunk().await, Some(ContentPart::Text { text: "hello".to_string() }));
-        assert_eq!(g.next_chunk().await, Some(ContentPart::Text { text: "world".to_string() }));
+        assert_eq!(
+            g.next_chunk().await,
+            Some(ContentPart::Text {
+                text: "hello".to_string()
+            })
+        );
+        assert_eq!(
+            g.next_chunk().await,
+            Some(ContentPart::Text {
+                text: "world".to_string()
+            })
+        );
         assert_eq!(g.next_chunk().await, None);
         assert_eq!(g.usage().await, Some((10, 20)));
     }
@@ -309,33 +358,61 @@ mod tests {
     async fn test_echo_provider() {
         let provider = EchoProvider;
         let mut g = provider.generate(None, vec![], vec![]).await.unwrap();
-        assert_eq!(g.next_chunk().await, Some(ContentPart::Text { text: "Hello from echo provider.".to_string() }));
+        assert_eq!(
+            g.next_chunk().await,
+            Some(ContentPart::Text {
+                text: "Hello from echo provider.".to_string()
+            })
+        );
         assert_eq!(g.tool_calls().await, vec![]);
     }
 
     #[tokio::test]
     async fn test_scripted_provider_matches() {
-        let provider = ScriptedProvider::new("default")
-            .with_response("magic_word", "matched!");
-        let mut g = provider.generate(Some("magic_word".to_string()), vec![], vec![]).await.unwrap();
-        assert_eq!(g.next_chunk().await, Some(ContentPart::Text { text: "matched!".to_string() }));
+        let provider = ScriptedProvider::new("default").with_response("magic_word", "matched!");
+        let mut g = provider
+            .generate(Some("magic_word".to_string()), vec![], vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            g.next_chunk().await,
+            Some(ContentPart::Text {
+                text: "matched!".to_string()
+            })
+        );
     }
 
     #[tokio::test]
     async fn test_scripted_provider_fallback() {
         let provider = ScriptedProvider::new("fallback");
-        let mut g = provider.generate(Some("other".to_string()), vec![], vec![]).await.unwrap();
-        assert_eq!(g.next_chunk().await, Some(ContentPart::Text { text: "fallback".to_string() }));
+        let mut g = provider
+            .generate(Some("other".to_string()), vec![], vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            g.next_chunk().await,
+            Some(ContentPart::Text {
+                text: "fallback".to_string()
+            })
+        );
     }
 
     #[test]
     fn test_resolve_base_url_from_env() {
-        unsafe { std::env::set_var("TEST_BASE_URL", "https://example.com"); }
-        assert_eq!(resolve_base_url("TEST_BASE_URL", "https://default.com"), "https://example.com");
+        unsafe {
+            std::env::set_var("TEST_BASE_URL", "https://example.com");
+        }
+        assert_eq!(
+            resolve_base_url("TEST_BASE_URL", "https://default.com"),
+            "https://example.com"
+        );
     }
 
     #[test]
     fn test_resolve_base_url_default() {
-        assert_eq!(resolve_base_url("NONEXISTENT_BASE_URL_XYZ", "https://default.com"), "https://default.com");
+        assert_eq!(
+            resolve_base_url("NONEXISTENT_BASE_URL_XYZ", "https://default.com"),
+            "https://default.com"
+        );
     }
 }

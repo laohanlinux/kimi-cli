@@ -104,8 +104,8 @@ pub fn parse_cli_turn_line(line: &str) -> anyhow::Result<TurnInput> {
     if !(t.starts_with('{') || t.starts_with('[')) {
         return Ok(TurnInput::text(t.to_string()));
     }
-    let v: serde_json::Value = serde_json::from_str(t)
-        .map_err(|e| anyhow::anyhow!("invalid JSON turn: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(t).map_err(|e| anyhow::anyhow!("invalid JSON turn: {e}"))?;
     parse_turn_from_value(&v)
 }
 

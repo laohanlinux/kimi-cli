@@ -34,7 +34,8 @@ pub trait ConfigSection: DeserializeOwned + Clone + Send + Sync + 'static {
 }
 
 /// Cross-section validator function.
-pub type CrossValidator = Box<dyn Fn(&toml::map::Map<String, toml::Value>) -> Result<(), ConfigError> + Send + Sync>;
+pub type CrossValidator =
+    Box<dyn Fn(&toml::map::Map<String, toml::Value>) -> Result<(), ConfigError> + Send + Sync>;
 
 /// Plugin-extensible config registry (§8.1 deviation).
 ///
@@ -43,7 +44,10 @@ pub type CrossValidator = Box<dyn Fn(&toml::map::Map<String, toml::Value>) -> Re
 #[allow(clippy::type_complexity)]
 pub struct ConfigRegistry {
     sections: HashMap<String, Box<dyn Any + Send + Sync>>,
-    parsers: HashMap<String, Box<dyn Fn(&toml::Value) -> Result<Box<dyn Any + Send + Sync>, ConfigError> + Send + Sync>>,
+    parsers: HashMap<
+        String,
+        Box<dyn Fn(&toml::Value) -> Result<Box<dyn Any + Send + Sync>, ConfigError> + Send + Sync>,
+    >,
     validators: Vec<CrossValidator>,
 }
 
@@ -59,15 +63,17 @@ impl ConfigRegistry {
     /// Register a typed config section parser.
     pub fn register_section<T: ConfigSection>(&mut self) {
         let name = T::section_name().to_string();
-        self.parsers.insert(name, Box::new(|value| {
-            let section: T = value.clone().try_into()
-                .map_err(|e| ConfigError {
+        self.parsers.insert(
+            name,
+            Box::new(|value| {
+                let section: T = value.clone().try_into().map_err(|e| ConfigError {
                     section: Some(T::section_name().to_string()),
                     message: format!("parse error: {}", e),
                 })?;
-            section.validate()?;
-            Ok(Box::new(section) as Box<dyn Any + Send + Sync>)
-        }));
+                section.validate()?;
+                Ok(Box::new(section) as Box<dyn Any + Send + Sync>)
+            }),
+        );
     }
 
     /// Register a cross-section validator.
@@ -90,7 +96,10 @@ impl ConfigRegistry {
 
         // Parse each registered section
         for (name, parser) in &self.parsers {
-            let section_value = raw.get(name).cloned().unwrap_or(toml::Value::Table(toml::Table::new()));
+            let section_value = raw
+                .get(name)
+                .cloned()
+                .unwrap_or(toml::Value::Table(toml::Table::new()));
             match parser(&section_value) {
                 Ok(section) => {
                     self.sections.insert(name.clone(), section);
@@ -117,8 +126,7 @@ impl ConfigRegistry {
 
     /// Get a parsed section by type.
     pub fn get_section<T: ConfigSection>(&self) -> Option<&T> {
-        self.sections.get(T::section_name())?
-            .downcast_ref::<T>()
+        self.sections.get(T::section_name())?.downcast_ref::<T>()
     }
 
     /// Get a parsed section or return its default.
@@ -138,11 +146,17 @@ pub struct LoopControlSection {
     pub max_context_size: usize,
 }
 
-fn default_max_steps() -> usize { 100 }
-fn default_max_context() -> usize { 128_000 }
+fn default_max_steps() -> usize {
+    100
+}
+fn default_max_context() -> usize {
+    128_000
+}
 
 impl ConfigSection for LoopControlSection {
-    fn section_name() -> &'static str { "loop_control" }
+    fn section_name() -> &'static str {
+        "loop_control"
+    }
 
     fn validate(&self) -> Result<(), ConfigError> {
         if self.max_steps_per_turn == 0 {
@@ -193,7 +207,9 @@ fn default_models_supports_vision() -> bool {
 }
 
 impl ConfigSection for ModelsSection {
-    fn section_name() -> &'static str { "models" }
+    fn section_name() -> &'static str {
+        "models"
+    }
 
     fn validate(&self) -> Result<(), ConfigError> {
         if !self.default_model.is_empty() && !self.models.contains_key(&self.default_model) {
@@ -235,7 +251,9 @@ pub struct MCPServerConfig {
 }
 
 impl ConfigSection for MCPSection {
-    fn section_name() -> &'static str { "mcp" }
+    fn section_name() -> &'static str {
+        "mcp"
+    }
 
     fn validate(&self) -> Result<(), ConfigError> {
         for (name, server) in &self.servers {
@@ -265,10 +283,14 @@ pub struct TrustProfileSection {
     pub overrides: Vec<crate::capability::CapabilityOverride>,
 }
 
-fn default_trust_default() -> String { "prompt".to_string() }
+fn default_trust_default() -> String {
+    "prompt".to_string()
+}
 
 impl ConfigSection for TrustProfileSection {
-    fn section_name() -> &'static str { "trust_profile" }
+    fn section_name() -> &'static str {
+        "trust_profile"
+    }
 
     fn validate(&self) -> Result<(), ConfigError> {
         let valid = ["auto", "prompt", "block"];
@@ -300,12 +322,20 @@ pub struct CompactionSection {
     pub min_messages: usize,
 }
 
-fn default_threshold_percent() -> f64 { 0.85 }
-fn default_threshold_absolute() -> usize { 50_000 }
-fn default_min_messages() -> usize { 4 }
+fn default_threshold_percent() -> f64 {
+    0.85
+}
+fn default_threshold_absolute() -> usize {
+    50_000
+}
+fn default_min_messages() -> usize {
+    4
+}
 
 impl ConfigSection for CompactionSection {
-    fn section_name() -> &'static str { "compaction" }
+    fn section_name() -> &'static str {
+        "compaction"
+    }
 
     fn validate(&self) -> Result<(), ConfigError> {
         if !(0.0..=1.0).contains(&self.threshold_percent) {
@@ -347,9 +377,13 @@ pub struct OrchestratorSection {
     pub ralph_max_iterations: usize,
 }
 
-fn default_ralph_max_iterations() -> usize { 5 }
+fn default_ralph_max_iterations() -> usize {
+    5
+}
 
-fn default_orchestrator() -> String { "react".to_string() }
+fn default_orchestrator() -> String {
+    "react".to_string()
+}
 
 impl Default for OrchestratorSection {
     fn default() -> Self {
@@ -361,14 +395,19 @@ impl Default for OrchestratorSection {
 }
 
 impl ConfigSection for OrchestratorSection {
-    fn section_name() -> &'static str { "orchestrator" }
+    fn section_name() -> &'static str {
+        "orchestrator"
+    }
 
     fn validate(&self) -> Result<(), ConfigError> {
         let valid = ["react", "plan", "ralph"];
         if !valid.contains(&self.default_orchestrator.as_str()) {
             return Err(ConfigError {
                 section: Some("orchestrator".to_string()),
-                message: format!("default_orchestrator must be one of {:?}, got '{}'", valid, self.default_orchestrator),
+                message: format!(
+                    "default_orchestrator must be one of {:?}, got '{}'",
+                    valid, self.default_orchestrator
+                ),
             });
         }
         Ok(())
@@ -403,18 +442,16 @@ pub fn default_registry() -> ConfigRegistry {
             .and_then(|v| v.as_table());
 
         if let Some(d) = default
-            && d != "echo" {
-                let has_map = model_map.is_some_and(|map| map.contains_key(d));
-                if !has_map {
-                    return Err(ConfigError {
-                        section: None,
-                        message: format!(
-                            "default_model '{}' not found in models map",
-                            d
-                        ),
-                    });
-                }
+            && d != "echo"
+        {
+            let has_map = model_map.is_some_and(|map| map.contains_key(d));
+            if !has_map {
+                return Err(ConfigError {
+                    section: None,
+                    message: format!("default_model '{}' not found in models map", d),
+                });
             }
+        }
         Ok(())
     }));
 
@@ -580,7 +617,11 @@ default_model = "missing-model"
         let result = registry.parse(&raw);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| e.message.contains("not found in models map")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("not found in models map"))
+        );
     }
 
     #[test]
