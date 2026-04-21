@@ -286,7 +286,7 @@ impl ReActOrchestrator {
             merge_adjacent_user_messages(h)
         };
         let system_prompt = Some(agent.system_prompt.clone());
-        let mut tools = runtime.toolset.lock().await.schemas();
+        let mut tools = runtime.toolset.read().await.schemas();
         apply_function_tool_schema_tags(&runtime.features, &mut tools);
 
         let retry_config = llm::RetryConfig::default();
@@ -302,7 +302,9 @@ impl ReActOrchestrator {
         let pull_backpressure = runtime
             .features
             .is_enabled(ExperimentalFeature::PullGeneration);
+        let mut assistant_parts: Vec<ContentPart> = Vec::new();
         while let Some(chunk) = generation.next_chunk().await {
+            assistant_parts.push(chunk.clone());
             let event = match chunk {
                 ContentPart::Text { text } => WireEvent::TextPart { text },
                 ContentPart::Think { text } => WireEvent::ThinkPart { text },
@@ -317,196 +319,263 @@ impl ReActOrchestrator {
         }
 
         let tool_calls = generation.tool_calls().await;
+
+        // Append assistant message to context (§1.2 L27)
+        let assistant_text: String = assistant_parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let assistant_msg = Message::Assistant {
+            content: if assistant_text.is_empty() {
+                None
+            } else {
+                Some(assistant_text)
+            },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls.clone())
+            },
+        };
+        {
+            let mut ctx = context.lock().await;
+            ctx.append(assistant_msg).await?;
+        }
+
         let has_tool_calls = !tool_calls.is_empty();
         let mut any_rejected = false;
 
         if has_tool_calls {
+            /// Outcome of a single concurrent tool execution.
+            struct ToolCallOutcome {
+                context_entry: Message,
+                rejected_without_feedback: bool,
+                audit_payload: serde_json::Value,
+            }
+
+            let mut futures = Vec::new();
             for tc in &tool_calls {
                 hub.broadcast(WireEvent::ToolCall {
                     id: tc.id.clone(),
                     function: tc.function.clone(),
                 });
-                let args: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
 
-                // Pre-validate hook
-                let validate_payload = serde_json::json!({
-                    "tool": tc.function.name,
-                    "args": &args,
-                    "tool_call_id": &tc.id,
-                });
-                let validate_result = runtime
-                    .hooks
-                    .run(HookStage::PreValidate, "tool_call", &validate_payload)
-                    .await?;
-                if let crate::hooks::EffectDecision::Block { reason } = validate_result.decision {
-                    hub.broadcast(WireEvent::ToolResult {
-                        tool_call_id: tc.id.clone(),
-                        output: format!("Blocked by hook: {}", reason),
-                        is_error: true,
-                        elapsed_ms: None,
+                let tc = tc.clone();
+                let runtime = runtime.clone();
+                let hub = hub.clone();
+                let token = token.child_tool_call(tc.id.clone());
+
+                futures.push(async move {
+                    let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                        .unwrap_or(serde_json::Value::Null);
+
+                    // Pre-validate hook
+                    let validate_payload = serde_json::json!({
+                        "tool": tc.function.name,
+                        "args": &args,
+                        "tool_call_id": &tc.id,
                     });
-                    let mut ctx = context.lock().await;
-                    ctx.append(Message::ToolEvent(crate::message::ToolEvent {
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.function.name.clone(),
-                        status: crate::message::ToolStatus::Failed,
-                        content: vec![crate::message::ContentBlock::Text {
-                            text: format!("Blocked by hook: {}", reason),
-                        }],
-                        metrics: None,
-                        elapsed_ms: None,
-                    }))
-                    .await?;
-                    any_rejected = true;
-                    continue;
-                }
-
-                // Pre-execute hook
-                let pre_payload = serde_json::json!({
-                    "tool": tc.function.name,
-                    "args": &args,
-                    "tool_call_id": &tc.id,
-                });
-                let pre_exec = runtime
-                    .hooks
-                    .run(HookStage::PreExecute, "tool_call", &pre_payload)
-                    .await?;
-                if runtime
-                    .features
-                    .is_enabled(ExperimentalFeature::StructuredEffects)
-                {
-                    if let crate::hooks::EffectDecision::Block { reason } = &pre_exec.decision {
+                    let validate_result = runtime
+                        .hooks
+                        .run(HookStage::PreValidate, "tool_call", &validate_payload)
+                        .await?;
+                    if let crate::hooks::EffectDecision::Block { reason } = validate_result.decision
+                    {
                         hub.broadcast(WireEvent::ToolResult {
                             tool_call_id: tc.id.clone(),
                             output: format!("Blocked by hook: {}", reason),
                             is_error: true,
                             elapsed_ms: None,
                         });
-                        let mut ctx = context.lock().await;
-                        ctx.append(Message::ToolEvent(crate::message::ToolEvent {
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            status: crate::message::ToolStatus::Failed,
-                            content: vec![crate::message::ContentBlock::Text {
-                                text: format!("Blocked by hook: {}", reason),
-                            }],
-                            metrics: None,
-                            elapsed_ms: None,
-                        }))
-                        .await?;
-                        drop(ctx);
-                        any_rejected = true;
-                        continue;
-                    }
-                }
-
-                let toolset = runtime.toolset.lock().await;
-                let tool_ctx = ToolContext {
-                    runtime: runtime.clone(),
-                    hub: Some(hub.clone()),
-                    token: token.child_tool_call(tc.id.clone()),
-                };
-                let start = std::time::Instant::now();
-                let tool_result = toolset
-                    .handle(&tc.function.name, args.clone(), &tool_ctx)
-                    .await;
-                let elapsed = start.elapsed().as_millis() as u64;
-                drop(toolset);
-
-                match &tool_result {
-                    Ok(output) => {
-                        // Wire display: text summary for UI compatibility
-                        let display_text =
-                            crate::message::content_to_string(&output.result.content);
-                        hub.broadcast(WireEvent::ToolResult {
-                            tool_call_id: tc.id.clone(),
-                            output: display_text,
-                            is_error: false,
-                            elapsed_ms: Some(elapsed),
+                        return Ok::<ToolCallOutcome, anyhow::Error>(ToolCallOutcome {
+                            context_entry: Message::ToolEvent(crate::message::ToolEvent {
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.function.name.clone(),
+                                status: crate::message::ToolStatus::Failed,
+                                content: vec![crate::message::ContentBlock::Text {
+                                    text: format!("Blocked by hook: {}", reason),
+                                }],
+                                metrics: None,
+                                elapsed_ms: None,
+                            }),
+                            rejected_without_feedback: true,
+                            audit_payload: serde_json::json!({
+                                "tool": tc.function.name,
+                                "args": &args,
+                                "tool_call_id": &tc.id,
+                                "result": "error",
+                            }),
                         });
-                        // Context storage: native ToolEvent with rich metadata (§6.4)
-                        let mut ctx = context.lock().await;
-                        ctx.append(Message::ToolEvent(crate::message::ToolEvent {
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            status: crate::message::ToolStatus::Completed,
-                            content: output.result.content.clone(),
-                            metrics: Some(output.metrics.clone()),
-                            elapsed_ms: Some(elapsed),
-                        }))
-                        .await?;
-
-                        // Post-execute hook
-                        let post_payload = serde_json::json!({
-                            "tool": tc.function.name,
-                            "args": &args,
-                            "tool_call_id": &tc.id,
-                            "result": "success",
-                        });
-                        let _ = runtime
-                            .hooks
-                            .run(HookStage::PostExecute, "tool_call", &post_payload)
-                            .await?;
                     }
-                    Err(e) => {
-                        let is_rejected = e.downcast_ref::<crate::tools::ToolRejected>().is_some();
-                        if is_rejected {
-                            // §1.2 L28: only trigger tool_rejected stop_reason when
-                            // the rejection has no user feedback (and is not a subagent).
-                            let has_feedback = e
-                                .downcast_ref::<crate::tools::ToolRejected>()
-                                .map(|tr| tr.has_feedback)
-                                .unwrap_or(false);
-                            if !has_feedback {
-                                any_rejected = true;
-                            }
+
+                    // Pre-execute hook
+                    let pre_payload = serde_json::json!({
+                        "tool": tc.function.name,
+                        "args": &args,
+                        "tool_call_id": &tc.id,
+                    });
+                    let pre_exec = runtime
+                        .hooks
+                        .run(HookStage::PreExecute, "tool_call", &pre_payload)
+                        .await?;
+                    if runtime
+                        .features
+                        .is_enabled(ExperimentalFeature::StructuredEffects)
+                    {
+                        if let crate::hooks::EffectDecision::Block { reason } = &pre_exec.decision {
+                            hub.broadcast(WireEvent::ToolResult {
+                                tool_call_id: tc.id.clone(),
+                                output: format!("Blocked by hook: {}", reason),
+                                is_error: true,
+                                elapsed_ms: None,
+                            });
+                            return Ok::<ToolCallOutcome, anyhow::Error>(ToolCallOutcome {
+                                context_entry: Message::ToolEvent(crate::message::ToolEvent {
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.function.name.clone(),
+                                    status: crate::message::ToolStatus::Failed,
+                                    content: vec![crate::message::ContentBlock::Text {
+                                        text: format!("Blocked by hook: {}", reason),
+                                    }],
+                                    metrics: None,
+                                    elapsed_ms: None,
+                                }),
+                                rejected_without_feedback: true,
+                                audit_payload: serde_json::json!({
+                                    "tool": tc.function.name,
+                                    "args": &args,
+                                    "tool_call_id": &tc.id,
+                                    "result": "error",
+                                }),
+                            });
                         }
-                        hub.broadcast(WireEvent::ToolResult {
-                            tool_call_id: tc.id.clone(),
-                            output: e.to_string(),
-                            is_error: true,
-                            elapsed_ms: Some(elapsed),
-                        });
-                        let mut ctx = context.lock().await;
-                        ctx.append(Message::ToolEvent(crate::message::ToolEvent {
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            status: crate::message::ToolStatus::Failed,
-                            content: vec![crate::message::ContentBlock::Text {
-                                text: e.to_string(),
-                            }],
-                            metrics: None,
-                            elapsed_ms: Some(elapsed),
-                        }))
-                        .await?;
-
-                        // Post-execute failure hook
-                        let post_payload = serde_json::json!({
-                            "tool": tc.function.name,
-                            "args": &args,
-                            "tool_call_id": &tc.id,
-                            "result": "error",
-                            "error": e.to_string(),
-                        });
-                        let _ = runtime
-                            .hooks
-                            .run(HookStage::PostExecuteFailure, "tool_call", &post_payload)
-                            .await?;
                     }
-                }
 
-                // Audit hook
-                let audit_payload = serde_json::json!({
-                    "tool": tc.function.name,
-                    "args": &args,
-                    "tool_call_id": &tc.id,
-                    "result": if tool_result.is_ok() { "success" } else { "error" },
+                    let toolset = runtime.toolset.read().await;
+                    let tool_ctx = ToolContext {
+                        runtime: runtime.clone(),
+                        hub: Some(hub.clone()),
+                        token,
+                    };
+                    let start = std::time::Instant::now();
+                    let tool_result = toolset
+                        .handle(&tc.function.name, args.clone(), &tool_ctx)
+                        .await;
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    drop(toolset);
+
+                    match tool_result {
+                        Ok(output) => {
+                            let display_text =
+                                crate::message::content_to_string(&output.result.content);
+                            hub.broadcast(WireEvent::ToolResult {
+                                tool_call_id: tc.id.clone(),
+                                output: display_text,
+                                is_error: false,
+                                elapsed_ms: Some(elapsed),
+                            });
+
+                            let post_payload = serde_json::json!({
+                                "tool": tc.function.name,
+                                "args": &args,
+                                "tool_call_id": &tc.id,
+                                "result": "success",
+                            });
+                            let _ = runtime
+                                .hooks
+                                .run(HookStage::PostExecute, "tool_call", &post_payload)
+                                .await?;
+
+                            Ok::<ToolCallOutcome, anyhow::Error>(ToolCallOutcome {
+                                context_entry: Message::ToolEvent(crate::message::ToolEvent {
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.function.name.clone(),
+                                    status: crate::message::ToolStatus::Completed,
+                                    content: output.result.content,
+                                    metrics: Some(output.metrics),
+                                    elapsed_ms: Some(elapsed),
+                                }),
+                                rejected_without_feedback: false,
+                                audit_payload: serde_json::json!({
+                                    "tool": tc.function.name,
+                                    "args": &args,
+                                    "tool_call_id": &tc.id,
+                                    "result": "success",
+                                }),
+                            })
+                        }
+                        Err(e) => {
+                            let is_rejected =
+                                e.downcast_ref::<crate::tools::ToolRejected>().is_some();
+                            let rejected_without_feedback = if is_rejected {
+                                let has_feedback = e
+                                    .downcast_ref::<crate::tools::ToolRejected>()
+                                    .map(|tr| tr.has_feedback)
+                                    .unwrap_or(false);
+                                !has_feedback
+                            } else {
+                                false
+                            };
+                            hub.broadcast(WireEvent::ToolResult {
+                                tool_call_id: tc.id.clone(),
+                                output: e.to_string(),
+                                is_error: true,
+                                elapsed_ms: Some(elapsed),
+                            });
+
+                            let post_payload = serde_json::json!({
+                                "tool": tc.function.name,
+                                "args": &args,
+                                "tool_call_id": &tc.id,
+                                "result": "error",
+                                "error": e.to_string(),
+                            });
+                            let _ = runtime
+                                .hooks
+                                .run(HookStage::PostExecuteFailure, "tool_call", &post_payload)
+                                .await?;
+
+                            Ok::<ToolCallOutcome, anyhow::Error>(ToolCallOutcome {
+                                context_entry: Message::ToolEvent(crate::message::ToolEvent {
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.function.name.clone(),
+                                    status: crate::message::ToolStatus::Failed,
+                                    content: vec![crate::message::ContentBlock::Text {
+                                        text: e.to_string(),
+                                    }],
+                                    metrics: None,
+                                    elapsed_ms: Some(elapsed),
+                                }),
+                                rejected_without_feedback,
+                                audit_payload: serde_json::json!({
+                                    "tool": tc.function.name,
+                                    "args": &args,
+                                    "tool_call_id": &tc.id,
+                                    "result": "error",
+                                }),
+                            })
+                        }
+                    }
                 });
+            }
+
+            let outcomes = futures::future::join_all(futures).await;
+            for outcome in outcomes {
+                let outcome = outcome?;
+                let mut ctx = context.lock().await;
+                ctx.append(outcome.context_entry).await?;
+                drop(ctx);
                 let _ = runtime
                     .hooks
-                    .run(HookStage::Audit, "tool_call", &audit_payload)
+                    .run(HookStage::Audit, "tool_call", &outcome.audit_payload)
                     .await?;
+                if outcome.rejected_without_feedback {
+                    any_rejected = true;
+                }
             }
         }
 
@@ -604,7 +673,9 @@ impl TurnOrchestrator for PlanModeOrchestrator {
         let pull_backpressure = runtime
             .features
             .is_enabled(ExperimentalFeature::PullGeneration);
+        let mut assistant_parts: Vec<ContentPart> = Vec::new();
         while let Some(chunk) = generation.next_chunk().await {
+            assistant_parts.push(chunk.clone());
             let event = match chunk {
                 ContentPart::Text { text } => WireEvent::TextPart { text },
                 ContentPart::Think { text } => WireEvent::ThinkPart { text },
@@ -626,7 +697,24 @@ impl TurnOrchestrator for PlanModeOrchestrator {
             });
         }
 
+        let assistant_text: String = assistant_parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
         let mut ctx = context.lock().await;
+        ctx.append(Message::Assistant {
+            content: if assistant_text.is_empty() {
+                None
+            } else {
+                Some(assistant_text)
+            },
+            tool_calls: None,
+        })
+        .await?;
         ctx.write_checkpoint().await?;
         drop(ctx);
 
@@ -1030,6 +1118,58 @@ mod tests {
         assert!(has_status, "Expected StatusUpdate");
     }
 
+    #[tokio::test]
+    async fn test_assistant_message_appended_to_context() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch.execute_turn(
+            &agent,
+            context.clone(),
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
+
+        let ctx = context.lock().await;
+        let history = ctx.history();
+        let assistant_msgs: Vec<_> = history
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant { .. }))
+            .collect();
+        assert_eq!(
+            assistant_msgs.len(),
+            1,
+            "Expected exactly one assistant message in context after turn, got {:?}",
+            assistant_msgs
+        );
+        if let Message::Assistant { content, tool_calls } = assistant_msgs[0] {
+            assert_eq!(content.as_deref(), Some("Hello from echo provider."));
+            assert!(tool_calls.is_none() || tool_calls.as_ref().unwrap().is_empty());
+        }
+    }
+
     /// First LLM response triggers `enter_plan_mode`; second is echo without tools.
     struct EnterPlanModeOnceThenEcho {
         armed: std::sync::atomic::AtomicBool,
@@ -1072,10 +1212,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_react_orchestrator_dmail_back_to_the_future() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+
+        // Seed context: user message -> assistant -> checkpoint(0) -> extra user message
+        let mut ctx = context.lock().await;
+        ctx.append(Message::User(crate::message::UserMessage::text("before cp")))
+            .await
+            .unwrap();
+        ctx.append(Message::Assistant {
+            content: Some("ack".to_string()),
+            tool_calls: None,
+        })
+        .await
+        .unwrap();
+        let cp_id = ctx.write_checkpoint().await.unwrap();
+        ctx.append(Message::User(crate::message::UserMessage::text("after cp")))
+            .await
+            .unwrap();
+        drop(ctx);
+
+        // Queue a D-Mail targeting the checkpoint
+        runtime
+            .denwa_renji
+            .send(
+                cp_id,
+                vec![Message::User(crate::message::UserMessage::text(
+                    "time travel message",
+                ))],
+            )
+            .await;
+
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "You are a test agent.".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "You are a test agent.".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(
+                &agent,
+                context.clone(),
+                llm,
+                &runtime,
+                TurnInput::text("trigger dmail"),
+                &hub,
+                token,
+            )
+            .await;
+
+        assert!(result.is_ok(), "D-Mail revert should not error: {:?}", result);
+
+        let hist = context.lock().await.history();
+
+        // D-Mail message must be present after revert
+        let has_dmail = hist.iter().any(|m| {
+            matches!(m, Message::User(u) if u.parts().iter().any(|p| matches!(p, crate::message::ContentPart::Text { text } if text == "time travel message")))
+        });
+        assert!(has_dmail, "expected D-Mail message in context after revert, got {:?}", hist);
+
+        // Turn continued after revert → assistant response present
+        let has_assistant = hist.iter().any(|m| {
+            matches!(m, Message::Assistant { content: Some(text), .. } if text == "Hello from echo provider.")
+        });
+        assert!(has_assistant, "expected assistant response after D-Mail re-trigger, got {:?}", hist);
+
+        // Verify StepInterrupted was broadcast
+        let mut events = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let step_interrupts: Vec<_> = events.iter().filter(|e| {
+            matches!(
+                e,
+                WireEvent::StepInterrupted { reason } if reason == "dmail_revert"
+            )
+        }).collect();
+        assert_eq!(step_interrupts.len(), 1, "expected exactly one StepInterrupted{{dmail_revert}}");
+
+        // Two StepBegin events: original step + re-triggered step after revert
+        let step_begins: Vec<_> = events.iter().filter(|e| matches!(e, WireEvent::StepBegin { .. })).collect();
+        assert_eq!(step_begins.len(), 2, "expected two steps (original + after D-Mail revert)");
+    }
+
+    #[tokio::test]
     async fn test_status_update_reflects_plan_mode_after_plan_tool() {
         let runtime = test_runtime();
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::EnterPlanModeTool));
         }
         let store = runtime.store.clone();
@@ -1137,7 +1375,7 @@ mod tests {
 
         // Register a tool that always rejects
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::FunctionTool::new(
                 "always_reject",
                 "A tool that always rejects",
@@ -1217,7 +1455,7 @@ mod tests {
 
         // Register a tool that rejects WITH feedback
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::FunctionTool::new(
                 "reject_with_feedback",
                 "A tool that rejects with feedback",
@@ -1288,6 +1526,163 @@ mod tests {
         assert_ne!(
             stop_reason, "tool_rejected",
             "Tool rejection with user feedback should not trigger tool_rejected stop_reason"
+        );
+    }
+
+    /// Tool that sleeps for a fixed duration; used to prove concurrent execution.
+    struct SleepTool {
+        name: String,
+        millis: u64,
+    }
+
+    impl SleepTool {
+        fn new(name: &str, millis: u64) -> Self {
+            Self {
+                name: name.to_string(),
+                millis,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for SleepTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "Sleep tool for concurrency testing"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn call(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tools::ToolContext,
+        ) -> anyhow::Result<crate::tools::ToolOutput> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.millis)).await;
+            Ok(crate::tools::ToolOutput {
+                result: crate::tools::ToolResult {
+                    r#type: "success".to_string(),
+                    content: vec![crate::message::ContentBlock::Text {
+                        text: format!("{} done", self.name),
+                    }],
+                    summary: format!("{} ok", self.name),
+                },
+                artifacts: vec![],
+                metrics: crate::message::ToolMetrics::default(),
+            })
+        }
+    }
+
+    /// LLM that calls two tools on first generate, then no tool calls.
+    struct MultiToolCallProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MultiToolCallProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatProvider for MultiToolCallProvider {
+        async fn generate(
+            &self,
+            _system_prompt: Option<String>,
+            _history: Vec<Message>,
+            _tools: Vec<serde_json::Value>,
+        ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![ContentPart::Text {
+                        text: "calling both".to_string(),
+                    }],
+                    vec![
+                        ToolCall {
+                            id: "tc-a".to_string(),
+                            kind: "function".to_string(),
+                            function: FunctionCall {
+                                name: "sleep_a".to_string(),
+                                arguments: "{}".to_string(),
+                            },
+                        },
+                        ToolCall {
+                            id: "tc-b".to_string(),
+                            kind: "function".to_string(),
+                            function: FunctionCall {
+                                name: "sleep_b".to_string(),
+                                arguments: "{}".to_string(),
+                            },
+                        },
+                    ],
+                    None,
+                )))
+            } else {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![ContentPart::Text {
+                        text: "done".to_string(),
+                    }],
+                    vec![],
+                    None,
+                )))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_tool_execution() {
+        let runtime = test_runtime();
+
+        {
+            let mut ts = runtime.toolset.write().await;
+            ts.register(Box::new(SleepTool::new("sleep_a", 60)));
+            ts.register(Box::new(SleepTool::new("sleep_b", 60)));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(MultiToolCallProvider::new());
+        let hub = RootWireHub::new();
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+
+        let start = std::time::Instant::now();
+        let result = orch
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("call both"),
+                &hub,
+                token,
+            )
+            .await;
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        assert!(result.is_ok(), "Concurrent tool execution should complete");
+        // Sequential would be ~120ms; concurrent should be <110ms with margin.
+        assert!(
+            elapsed < 110,
+            "Tools should run concurrently (elapsed {}ms >= 110ms)",
+            elapsed
         );
     }
 
@@ -1804,7 +2199,7 @@ mod tests {
             .hooks
             .register(std::sync::Arc::new(BlockThinkPreExecute));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::think_tool()));
         }
         let store = runtime.store.clone();
@@ -1859,7 +2254,7 @@ mod tests {
             .hooks
             .register(std::sync::Arc::new(BlockThinkPreExecute));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::think_tool()));
         }
         let store = runtime.store.clone();
@@ -1994,7 +2389,7 @@ mod tests {
             .hooks
             .register(std::sync::Arc::new(BlockThinkPreValidate));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::misc::ThinkTool));
         }
 
@@ -2054,7 +2449,7 @@ mod tests {
             counter: counter.clone(),
         }));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::misc::ThinkTool));
         }
 
@@ -2106,7 +2501,7 @@ mod tests {
             counter: counter.clone(),
         }));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::misc::ThinkTool));
         }
 
@@ -2155,7 +2550,7 @@ mod tests {
             .hooks
             .register(std::sync::Arc::new(FailingCriticalEffect));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::misc::ThinkTool));
         }
 
@@ -2300,7 +2695,7 @@ mod tests {
             counter: counter.clone(),
         }));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(FailingTool));
         }
 
@@ -2349,7 +2744,7 @@ mod tests {
             .hooks
             .register(std::sync::Arc::new(FailingNonCriticalEffect));
         {
-            let mut ts = runtime.toolset.lock().await;
+            let mut ts = runtime.toolset.write().await;
             ts.register(Box::new(crate::tools::misc::ThinkTool));
         }
 

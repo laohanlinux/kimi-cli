@@ -194,6 +194,20 @@ pub fn ask_user_question_tool() -> FunctionTool {
                             .collect()
                     })
                     .unwrap_or_default();
+                // Auto-dismiss in yolo mode (§3.3 AskUserQuestion)
+                if ctx.runtime.is_yolo() {
+                    return Ok(ToolOutput {
+                        result: ToolResult {
+                            r#type: "success".to_string(),
+                            content: vec![ContentBlock::Text {
+                                text: "[YOLO mode: question auto-dismissed]".to_string(),
+                            }],
+                            summary: "Question auto-dismissed in YOLO mode".to_string(),
+                        },
+                        artifacts: vec![],
+                        metrics: ToolMetrics::default(),
+                    });
+                }
                 let qs: Vec<crate::wire::Question> = questions
                     .iter()
                     .map(|q| crate::wire::Question {
@@ -248,6 +262,20 @@ impl Tool for AskUserQuestionTool {
                     .collect()
             })
             .unwrap_or_default();
+        // Auto-dismiss in yolo mode (§3.3 AskUserQuestion)
+        if ctx.runtime.is_yolo() {
+            return Ok(ToolOutput {
+                result: ToolResult {
+                    r#type: "success".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "[YOLO mode: question auto-dismissed]".to_string(),
+                    }],
+                    summary: "Question auto-dismissed in YOLO mode".to_string(),
+                },
+                artifacts: vec![],
+                metrics: ToolMetrics::default(),
+            });
+        }
         let qs: Vec<crate::wire::Question> = questions
             .iter()
             .map(|q| crate::wire::Question {
@@ -633,10 +661,29 @@ mod tests {
         assert_eq!(msgs.len(), 1);
     }
 
+    fn test_ctx_no_yolo() -> ToolContext {
+        let store = crate::store::Store::open(std::path::Path::new(":memory:")).unwrap();
+        ToolContext {
+            hub: None,
+            token: crate::token::ContextToken::new("test", "test-turn"),
+            runtime: crate::runtime::Runtime::new(
+                crate::config::Config::default(),
+                crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
+                Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    false,
+                    vec![],
+                )),
+                crate::wire::RootWireHub::new(),
+                store,
+            ),
+        }
+    }
+
     #[tokio::test]
     async fn test_ask_user_question_tool() {
         let tool = AskUserQuestionTool;
-        let ctx = test_ctx();
+        let ctx = test_ctx_no_yolo();
         let questions =
             vec![serde_json::json!({"question": "What is your name?", "options": null})];
 
@@ -659,6 +706,22 @@ mod tests {
         assert_eq!(out.result.r#type, "success");
         assert!(out.result.summary.contains("Question answered"));
         let _ = resolve_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_ask_user_question_auto_dismisses_in_yolo() {
+        let tool = AskUserQuestionTool;
+        let ctx = test_ctx(); // yolo = true
+        let out = tool
+            .call(serde_json::json!({"questions": ["What?"]}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.result.r#type, "success");
+        assert!(
+            out.result.summary.contains("auto-dismissed"),
+            "Expected auto-dismiss in yolo mode, got: {}",
+            out.result.summary
+        );
     }
 
     #[tokio::test]

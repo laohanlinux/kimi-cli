@@ -823,22 +823,81 @@ mod tests {
     }
 }
 
+/// NDJSON recorder that appends wire envelopes to a file (§1.2 L35).
+#[derive(Clone)]
+pub struct WireRecorder {
+    file: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+}
+
+impl WireRecorder {
+    /// Open (or create) `wire.jsonl` in the given directory.
+    pub fn open(dir: &std::path::Path) -> anyhow::Result<Self> {
+        let path = dir.join("wire.jsonl");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            file: std::sync::Arc::new(std::sync::Mutex::new(file)),
+        })
+    }
+
+    /// Append a single envelope as one NDJSON line.
+    pub fn record(&self, envelope: &WireEnvelope) {
+        if let Ok(line) = serde_json::to_string(envelope) {
+            if let Ok(mut f) = self.file.lock() {
+                use std::io::Write;
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+    }
+
+    /// Flush the underlying file.
+    pub fn flush(&self) {
+        if let Ok(mut f) = self.file.lock() {
+            use std::io::Write;
+            let _ = f.flush();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RootWireHub {
     sender: tokio::sync::broadcast::Sender<WireEnvelope>,
+    recorder: Option<WireRecorder>,
 }
 
 impl RootWireHub {
     pub fn new() -> Self {
         let (sender, _) = tokio::sync::broadcast::channel(1024);
-        Self { sender }
+        Self {
+            sender,
+            recorder: None,
+        }
+    }
+
+    /// Create a hub with an NDJSON recorder attached.
+    pub fn with_recorder(dir: &std::path::Path) -> anyhow::Result<Self> {
+        let (sender, _) = tokio::sync::broadcast::channel(1024);
+        let recorder = WireRecorder::open(dir)?;
+        Ok(Self {
+            sender,
+            recorder: Some(recorder),
+        })
     }
 
     pub fn broadcast(&self, event: WireEvent) {
-        let _ = self.sender.send(WireEnvelope::new(event));
+        let envelope = WireEnvelope::new(event);
+        if let Some(ref rec) = self.recorder {
+            rec.record(&envelope);
+        }
+        let _ = self.sender.send(envelope);
     }
 
     pub fn broadcast_envelope(&self, envelope: WireEnvelope) {
+        if let Some(ref rec) = self.recorder {
+            rec.record(&envelope);
+        }
         let _ = self.sender.send(envelope);
     }
 
@@ -849,6 +908,13 @@ impl RootWireHub {
     /// Subscribe to events filtered by [`SourceType`] (§6.5 — consumer-side filter on the broadcast stream).
     pub fn subscribe_filtered(&self, source_type: SourceType) -> SourceFilteredWireReceiver {
         SourceFilteredWireReceiver::new(self, source_type)
+    }
+
+    /// Flush the recorder, if any.
+    pub fn flush_recorder(&self) {
+        if let Some(ref rec) = self.recorder {
+            rec.flush();
+        }
     }
 }
 
@@ -914,5 +980,70 @@ mod filtered_tests {
             .unwrap()
             .unwrap();
         assert!(matches!(ev.event, WireEvent::TextPart { text } if text == "sub"));
+    }
+
+    #[tokio::test]
+    async fn test_wire_recorder_appends_ndjson() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = RootWireHub::with_recorder(tmp.path()).unwrap();
+
+        hub.broadcast(WireEvent::TurnBegin {
+            user_input: UserInput::text_only("hello"),
+        });
+        hub.broadcast(WireEvent::TextPart {
+            text: "world".to_string(),
+        });
+        hub.broadcast(WireEvent::TurnEnd);
+        hub.flush_recorder();
+
+        let path = tmp.path().join("wire.jsonl");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 3, "expected 3 NDJSON lines");
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["event"]["type"], "turn_begin");
+        assert_eq!(first["event"]["user_input"]["text"], "hello");
+
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["event"]["type"], "text_part");
+        assert_eq!(second["event"]["text"], "world");
+
+        let third: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(third["event"]["type"], "turn_end");
+    }
+
+    #[tokio::test]
+    async fn test_wire_recorder_preserves_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = RootWireHub::with_recorder(tmp.path()).unwrap();
+
+        let env = WireEnvelope::new(WireEvent::TextPart {
+            text: "from subagent".to_string(),
+        })
+        .with_source(EventSource::subagent("sa-1".to_string(), None));
+        hub.broadcast_envelope(env);
+        hub.flush_recorder();
+
+        let path = tmp.path().join("wire.jsonl");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let line: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(line["source"]["source_type"], "subagent");
+        assert_eq!(line["source"]["agent_id"], "sa-1");
+    }
+
+    #[tokio::test]
+    async fn test_wire_recorder_survives_clone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = RootWireHub::with_recorder(tmp.path()).unwrap();
+        let hub2 = hub.clone();
+
+        hub.broadcast(WireEvent::TurnEnd);
+        hub2.broadcast(WireEvent::TurnEnd);
+        hub.flush_recorder();
+
+        let path = tmp.path().join("wire.jsonl");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 2);
     }
 }

@@ -18,6 +18,7 @@ impl Tool for ShellTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string" },
+                "description": { "type": "string" },
                 "timeout": { "type": "integer", "default": 300 },
                 "run_in_background": { "type": "boolean", "default": false }
             },
@@ -28,6 +29,10 @@ impl Tool for ShellTool {
     async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
         let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(300);
+        let run_in_background = args
+            .get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if command.is_empty() {
             anyhow::bail!("Empty command");
         }
@@ -48,10 +53,46 @@ impl Tool for ShellTool {
                 has_feedback: false,
             }.into());
         }
+
+        if run_in_background {
+            let spec = crate::background::types::TaskSpec {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: crate::background::types::TaskKind::Bash {
+                    command: command.to_string(),
+                },
+                created_at: chrono::Utc::now(),
+                dependencies: vec![],
+                max_retries: 0,
+                timeout_s: Some(timeout),
+            };
+            let task_id = ctx.runtime.bg_manager.submit(spec).await?;
+            return Ok(ToolOutput {
+                result: ToolResult {
+                    r#type: "success".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: format!(
+                            "Background task started. Use `task_output` to check progress. Task ID: {}",
+                            task_id
+                        ),
+                    }],
+                    summary: format!("Background shell task {}", task_id),
+                },
+                artifacts: vec![],
+                metrics: ToolMetrics::default(),
+            });
+        }
+
         let start = std::time::Instant::now();
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
-            Command::new("sh").arg("-c").arg(command).output(),
+            Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .stdin(std::process::Stdio::null())
+                .env("CI", "1")
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .output(),
         )
         .await??;
         let elapsed_ms = start.elapsed().as_millis() as u64;

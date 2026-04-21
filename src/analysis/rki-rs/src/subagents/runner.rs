@@ -46,7 +46,7 @@ impl ForegroundSubagentRunner {
         );
 
         {
-            let mut ts = subagent_runtime.toolset.lock().await;
+            let mut ts = subagent_runtime.toolset.write().await;
             ts.register(Box::new(ShellTool));
             ts.register(Box::new(ReadFileTool));
             ts.register(Box::new(WriteFileTool));

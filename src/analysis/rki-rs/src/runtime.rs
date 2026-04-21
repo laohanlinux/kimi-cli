@@ -26,7 +26,9 @@ use crate::stream::SessionStream;
 use crate::token::ContextToken;
 use crate::toolset::Toolset;
 use crate::wire::RootWireHub;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Resolve the initial orchestrator, applying A/B testing when the feature flag is enabled.
 fn resolve_orchestrator<'a>(
@@ -58,7 +60,7 @@ pub struct Runtime {
     pub session: Session,
     pub approval: Arc<ApprovalRuntime>,
     pub hub: RootWireHub,
-    pub toolset: Arc<tokio::sync::Mutex<Toolset>>,
+    pub toolset: Arc<tokio::sync::RwLock<Toolset>>,
     pub environment: Environment,
     pub bg_manager: BackgroundTaskManager,
     pub question: Arc<QuestionManager>,
@@ -76,6 +78,12 @@ pub struct Runtime {
     pub capabilities: Option<CapabilityRegistry>,
     /// Builtin subagent type registry (§1.2 LaborMarket).
     pub labor_market: LaborMarket,
+    /// MCP server configurations from `[mcp.servers]` (§1.2 L08 / L19).
+    pub mcp_servers: HashMap<String, crate::config_registry::MCPServerConfig>,
+    /// Whether deferred MCP loading has already been kicked off.
+    pub mcp_loading_started: Arc<AtomicBool>,
+    /// Current MCP status string for `StatusUpdate` (§1.2 L24).
+    pub mcp_status: Arc<tokio::sync::RwLock<String>>,
     orchestrator: Arc<tokio::sync::RwLock<Arc<dyn TurnOrchestrator>>>,
 }
 
@@ -190,7 +198,7 @@ impl Runtime {
             session,
             approval,
             hub,
-            toolset: Arc::new(tokio::sync::Mutex::new(Toolset::new())),
+            toolset: Arc::new(tokio::sync::RwLock::new(Toolset::new())),
             environment: env,
             bg_manager: bg_manager.clone(),
             question,
@@ -206,6 +214,9 @@ impl Runtime {
             session_stream,
             capabilities,
             labor_market,
+            mcp_servers: HashMap::new(),
+            mcp_loading_started: Arc::new(AtomicBool::new(false)),
+            mcp_status: Arc::new(tokio::sync::RwLock::new("not_configured".to_string())),
             orchestrator: Arc::new(tokio::sync::RwLock::new(orchestrator)),
         };
         runtime.bg_manager.set_runtime(runtime.clone());
@@ -236,6 +247,18 @@ impl Runtime {
 
     pub async fn is_plan_mode(&self) -> bool {
         self.get_orchestrator().await.name() == "plan"
+    }
+
+    pub fn set_mcp_servers(&mut self, servers: HashMap<String, crate::config_registry::MCPServerConfig>) {
+        if !servers.is_empty() {
+            self.mcp_servers = servers;
+            // Update status to reflect pending loading
+            let status = self.mcp_status.clone();
+            tokio::spawn(async move {
+                let mut s = status.write().await;
+                *s = "pending".to_string();
+            });
+        }
     }
 
     pub fn is_yolo(&self) -> bool {

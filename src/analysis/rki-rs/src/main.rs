@@ -89,7 +89,11 @@ async fn main() -> anyhow::Result<()> {
         session::Session::create(&store, work_dir)?
     };
 
-    let hub = wire::RootWireHub::new();
+    let hub = wire::RootWireHub::with_recorder(&session.dir)
+        .unwrap_or_else(|e| {
+            eprintln!("Warning: could not open wire recorder: {}. Continuing without persistence.", e);
+            wire::RootWireHub::new()
+        });
     let mut approval = approval::ApprovalRuntime::new(
         hub.clone(),
         args.yolo,
@@ -105,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let approval = Arc::new(approval);
 
     let features = feature_flags::FeatureFlags::from_env();
-    let runtime = runtime::Runtime::with_features(
+    let mut runtime = runtime::Runtime::with_features(
         config.clone(),
         session.clone(),
         approval.clone(),
@@ -113,6 +117,12 @@ async fn main() -> anyhow::Result<()> {
         store.clone(),
         features,
     );
+    // Load MCP server configs from registry (§1.2 L08)
+    if let Ok(registry) = config_registry::parse_config_file(&config_path) {
+        if let Some(mcp_sec) = registry.get_section::<config_registry::MCPSection>() {
+            runtime.set_mcp_servers(mcp_sec.servers.clone());
+        }
+    }
     let _ = runtime.bg_manager.recover().await;
 
     // CLI mode overrides: plan mode and Ralph mode (§1.2 bootstrap flags)
@@ -212,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
     let toolset = runtime.toolset.clone();
     let mut mcp_sessions: Vec<Arc<mcp::MCPSession>> = Vec::new();
     {
-        let mut ts = toolset.lock().await;
+        let mut ts = toolset.write().await;
         ts.register(Box::new(tools::ShellTool));
         ts.register(Box::new(tools::ReadFileTool));
         ts.register(Box::new(tools::ReadMediaFileTool));

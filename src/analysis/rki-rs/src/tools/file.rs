@@ -85,25 +85,8 @@ impl Tool for ReadFileTool {
         })
     }
 
-    async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let approved = ctx
-            .runtime
-            .approval
-            .request_tool(
-                "".to_string(),
-                "str_replace_file",
-                &args,
-                format!("Edit file {}", path),
-                format!("Replace text in {}", path),
-            )
-            .await?;
-        if !approved {
-            return Err(crate::tools::ToolRejected {
-                reason: "Approval rejected".to_string(),
-                has_feedback: false,
-            }.into());
-        }
         let line_offset = args
             .get("line_offset")
             .and_then(|v| v.as_i64())
@@ -117,11 +100,20 @@ impl Tool for ReadFileTool {
             (line_offset as usize).saturating_sub(1)
         };
         let end = (start + n_lines).min(lines.len());
-        let selected = lines[start..end].join("\n");
+        let mut width = 1;
+        let mut temp = end;
+        while temp >= 10 {
+            width += 1;
+            temp /= 10;
+        }
+        let selected: Vec<String> = (start..end)
+            .map(|i| format!("{:>width$}\t{}", i + 1, lines[i], width = width))
+            .collect();
+        let text = selected.join("\n");
         Ok(ToolOutput {
             result: ToolResult {
                 r#type: "success".to_string(),
-                content: vec![ContentBlock::Text { text: selected }],
+                content: vec![ContentBlock::Text { text }],
                 summary: format!("Read {} lines", end - start),
             },
             artifacts: vec![],
@@ -159,22 +151,25 @@ impl Tool for WriteFileTool {
             .get("mode")
             .and_then(|v| v.as_str())
             .unwrap_or("overwrite");
-        let approved = ctx
-            .runtime
-            .approval
-            .request_tool(
-                "".to_string(),
-                "write_file",
-                &args,
-                format!("{} file {}", mode, path),
-                format!("{} {} bytes to {}", mode, content.len(), path),
-            )
-            .await?;
-        if !approved {
-            return Err(crate::tools::ToolRejected {
-                reason: "Approval rejected".to_string(),
-                has_feedback: false,
-            }.into());
+        let plan_mode = ctx.runtime.is_plan_mode().await;
+        if !plan_mode {
+            let approved = ctx
+                .runtime
+                .approval
+                .request_tool(
+                    "".to_string(),
+                    "write_file",
+                    &args,
+                    format!("{} file {}", mode, path),
+                    format!("{} {} bytes to {}", mode, content.len(), path),
+                )
+                .await?;
+            if !approved {
+                return Err(crate::tools::ToolRejected {
+                    reason: "Approval rejected".to_string(),
+                    has_feedback: false,
+                }.into());
+            }
         }
         // Capture before state for diff (§7.3 structured output)
         let before = tokio::fs::read_to_string(path).await.unwrap_or_default();
@@ -234,29 +229,78 @@ impl Tool for StrReplaceFileTool {
                         "replace_all": { "type": "boolean", "default": false }
                     },
                     "required": ["old", "new"]
+                },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old": { "type": "string" },
+                            "new": { "type": "string" },
+                            "replace_all": { "type": "boolean", "default": false }
+                        },
+                        "required": ["old", "new"]
+                    }
                 }
             },
-            "required": ["path", "edit"]
+            "required": ["path"]
         })
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
+    async fn call(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let edit = args
-            .get("edit")
-            .ok_or_else(|| anyhow::anyhow!("Missing edit"))?;
-        let old = edit.get("old").and_then(|v| v.as_str()).unwrap_or("");
-        let new = edit.get("new").and_then(|v| v.as_str()).unwrap_or("");
-        let replace_all = edit
-            .get("replace_all")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+
+        // Collect edits: single `edit` or batch `edits`
+        let mut edits: Vec<(String, String, bool)> = Vec::new();
+        if let Some(edit) = args.get("edit") {
+            let old = edit.get("old").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let new = edit.get("new").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let replace_all = edit.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+            edits.push((old, new, replace_all));
+        }
+        if let Some(batch) = args.get("edits").and_then(|v| v.as_array()) {
+            for edit in batch {
+                let old = edit.get("old").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let new = edit.get("new").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let replace_all = edit.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+                edits.push((old, new, replace_all));
+            }
+        }
+        if edits.is_empty() {
+            anyhow::bail!("Missing edit or edits");
+        }
+
+        // Auto-approve plan file writes when in plan mode
+        let plan_mode = ctx.runtime.is_plan_mode().await;
+        if !plan_mode {
+            let approved = ctx
+                .runtime
+                .approval
+                .request_tool(
+                    "".to_string(),
+                    "str_replace_file",
+                    &args,
+                    format!("Edit {} file {}", edits.len(), path),
+                    format!("{} replacement(s) in {}", edits.len(), path),
+                )
+                .await?;
+            if !approved {
+                return Err(crate::tools::ToolRejected {
+                    reason: "Approval rejected".to_string(),
+                    has_feedback: false,
+                }.into());
+            }
+        }
+
         let before = tokio::fs::read_to_string(path).await?;
-        let after = if replace_all {
-            before.replace(old, new)
-        } else {
-            before.replacen(old, new, 1)
-        };
+        let mut after = before.clone();
+        for (old, new, replace_all) in &edits {
+            after = if *replace_all {
+                after.replace(old, new)
+            } else {
+                after.replacen(old, new, 1)
+            };
+        }
         tokio::fs::write(path, after.as_bytes()).await?;
         Ok(ToolOutput {
             result: ToolResult {
@@ -264,7 +308,7 @@ impl Tool for StrReplaceFileTool {
                 content: vec![
                     ContentBlock::Diff { before, after },
                     ContentBlock::Text {
-                        text: format!("Replaced in {}", path),
+                        text: format!("Replaced {} edit(s) in {}", edits.len(), path),
                     },
                 ],
                 summary: "Replacement done".to_string(),
@@ -299,6 +343,9 @@ impl Tool for GlobTool {
 
     async fn call(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+        if pattern.starts_with("**") {
+            anyhow::bail!("Glob patterns starting with '**' are not supported");
+        }
         let dir = args
             .get("directory")
             .and_then(|v| v.as_str())

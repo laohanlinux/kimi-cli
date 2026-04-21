@@ -290,6 +290,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_soul_run_yolo_slash_command() {
+        let soul = test_soul();
+        let hub = RootWireHub::new();
+        let initial = soul.runtime.is_yolo();
+        let result = soul.run("/yolo", &hub).await.unwrap();
+        assert_eq!(result.stop_reason, "slash:yolo");
+        assert_eq!(soul.runtime.is_yolo(), !initial);
+    }
+
+    #[tokio::test]
+    async fn test_soul_run_ralph_slash_command() {
+        let soul = test_soul();
+        let hub = RootWireHub::new();
+        let result = soul.run("/ralph 7", &hub).await.unwrap();
+        assert_eq!(result.stop_reason, "slash:ralph");
+        assert!(matches!(
+            soul.runtime.get_orchestrator().await.name(),
+            "ralph"
+        ));
+    }
+
+    #[tokio::test]
     async fn test_soul_auto_title_after_turn() {
         let soul = test_soul();
         let hub = RootWireHub::new();
