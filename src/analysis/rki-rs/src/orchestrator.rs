@@ -145,6 +145,52 @@ impl ReActOrchestrator {
         checkpoint_id: u64,
         token: ContextToken,
     ) -> anyhow::Result<String> {
+        // Deferred MCP loading (§1.2 L19): start once if servers configured.
+        if !runtime.mcp_servers.is_empty()
+            && !runtime
+                .mcp_loading_started
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let rt = runtime.clone();
+            tokio::spawn(async move {
+                rt.mcp_status.write().await.clone_from(&"loading".to_string());
+                let mut connected = 0usize;
+                for (name, cfg) in &rt.mcp_servers {
+                    let client = Arc::new(crate::mcp::MCPClient::new(
+                        name.clone(),
+                        std::iter::once(cfg.command.clone())
+                            .chain(cfg.args.clone())
+                            .collect(),
+                    ));
+                    match client.list_tools().await {
+                        Ok(tools) => {
+                            let mut ts = rt.toolset.write().await;
+                            for t in tools {
+                                ts.register(Box::new(crate::mcp::MCPTool::new(
+                                    t.name,
+                                    t.description,
+                                    t.input_schema,
+                                    client.clone(),
+                                )));
+                            }
+                            connected += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!("MCP server '{}' failed to load tools: {}", name, e);
+                        }
+                    }
+                }
+                let status = if connected == rt.mcp_servers.len() {
+                    "connected"
+                } else if connected > 0 {
+                    "partial"
+                } else {
+                    "failed"
+                };
+                *rt.mcp_status.write().await = status.to_string();
+            });
+        }
+
         let max_steps = runtime
             .config
             .read()
@@ -589,11 +635,12 @@ impl ReActOrchestrator {
         let token_count = ctx.token_count();
         drop(ctx);
         let plan_mode = runtime.is_plan_mode().await;
+        let mcp_status = runtime.mcp_status.read().await.clone();
         hub.broadcast(WireEvent::StatusUpdate {
             token_count,
             context_size: max_context,
             plan_mode,
-            mcp_status: "connected".to_string(),
+            mcp_status,
         });
 
         // Steer consumption: inject queued user messages
