@@ -55,3 +55,4 @@ pub mod ui;
 pub mod user_input;
 pub mod wire;
 pub mod workdir_ls;
+pub mod tui;

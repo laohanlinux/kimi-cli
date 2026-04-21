@@ -32,3 +32,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 notify = "6"
 base64 = "0.22"
 libc = "0.2"
+directories = "6.0.0"
+ratatui = "0.30.0"
+syntect = "5.3.0"
