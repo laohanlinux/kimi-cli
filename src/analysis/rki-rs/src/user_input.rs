@@ -3,38 +3,88 @@
 use crate::config::Config;
 use crate::message::ContentPart;
 
+/// Built-in vision capability catalog.
+///
+/// Entries are matched as **exact** names or **prefixes** (the model id must start with the
+/// pattern followed by `-` or `.` or be identical). First match wins.
+///
+/// This table is richer than the previous flat negative-only heuristic and gives predictable
+/// defaults for common model families without requiring every variant in `vision_by_model`.
+static VISION_CATALOG: &[(&str, bool)] = &[
+    // Vision-positive families
+    ("gpt-4o", true),       // gpt-4o, gpt-4o-mini, gpt-4o-2024-08-06, gpt-4o-latest …
+    ("gpt-4-turbo", true),  // gpt-4-turbo, gpt-4-turbo-preview …
+    ("claude-3", true),     // claude-3-opus, claude-3-sonnet, claude-3-haiku, claude-3-5-sonnet …
+    ("kimi-k2", true),      // kimi-k2 and kimi-k2-* variants
+    ("gemini-1.5", true),   // gemini-1.5-pro, gemini-1.5-flash …
+    ("gemini-2.0", true),   // gemini-2.0-flash, gemini-2.0-pro …
+    // Vision-negative families / specials
+    ("echo", false),
+    ("mock-llm", false),
+    ("gpt-3.5", false),     // gpt-3.5-turbo, gpt-3.5-turbo-16k …
+    ("text-davinci", false),
+    ("text-embedding", false),
+    ("embedding", false),   // broad fallback: anything starting with "embedding-"
+    ("rerank", false),
+    ("moderation", false),
+    ("llama-2", false),     // llama-2 is generally text-only; vision variants use distinct names
+];
+
+fn catalog_match(model: &str) -> Option<bool> {
+    let m = model.trim().to_ascii_lowercase();
+    if m.is_empty() {
+        return Some(true);
+    }
+    for (pattern, supports) in VISION_CATALOG {
+        let p = pattern.to_ascii_lowercase();
+        if m == p || m.starts_with(&(p.clone() + "-")) || m.starts_with(&(p.clone() + ".")) {
+            return Some(*supports);
+        }
+    }
+    // Broad fallback for common utility model classes that are never multimodal chat.
+    if m.contains("embedding") || m.contains("rerank") || m.contains("moderation") {
+        return Some(false);
+    }
+    None
+}
+
 /// Whether the configured **model id** is treated as vision-capable for input validation.
 ///
 /// Local / deterministic providers (`echo`, mocks) are **false** so image-like user text is
 /// rejected. API-style model ids default to **true**. Set `Config.ignore_vision_model_hint` or
 /// `KIMI_IGNORE_VISION_MODEL_HINT=1` to use only the `supports_vision` flag.
 pub fn model_supports_vision_hint(model: &str) -> bool {
-    let m = model.trim().to_ascii_lowercase();
-    if m.is_empty() {
-        return true;
-    }
-    if m == "echo" || m.starts_with("echo/") || m.contains("mock-llm") {
-        return false;
-    }
-    // Narrow negatives: embedding / rerank style ids are never multimodal chat.
-    if m.contains("embedding")
-        || m.contains("embed-")
-        || m.contains("text-embedding")
-        || m.contains("rerank")
-        || m.contains("moderation")
-    {
-        return false;
-    }
-    true
+    catalog_match(model).unwrap_or(true)
 }
 
-/// Lookup `[models.vision_by_model]` merged into [`Config::vision_by_model`] (case-insensitive key match).
+/// Lookup `[models.vision_by_model]` merged into [`Config::vision_by_model`].
+///
+/// Keys are matched in this order:
+/// 1. **Exact** case-insensitive match.
+/// 2. **Prefix** match for keys ending with `*` (e.g. `gpt-4o*` matches `gpt-4o-2024-08-06`).
 pub fn catalog_supports_vision_for_model(config: &Config, model: &str) -> Option<bool> {
     let m = model.trim();
-    config
+    let m_lower = m.to_ascii_lowercase();
+
+    // 1. Exact match
+    if let Some(v) = config
         .vision_by_model
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(m))
+        .map(|(_, v)| *v)
+    {
+        return Some(v);
+    }
+
+    // 2. Prefix wildcard (key ends with '*')
+    config
+        .vision_by_model
+        .iter()
+        .filter(|(k, _)| k.ends_with('*'))
+        .find(|(k, _)| {
+            let prefix = &k[..k.len() - 1];
+            m_lower.starts_with(&prefix.to_ascii_lowercase())
+        })
         .map(|(_, v)| *v)
 }
 
@@ -208,6 +258,68 @@ mod tests {
         assert!(!model_supports_vision_hint("text-embedding-3-small"));
         assert!(!model_supports_vision_hint("openai-moderation-latest"));
         assert!(!model_supports_vision_hint("cohere-rerank-v3"));
+    }
+
+    #[test]
+    fn test_vision_catalog_prefix_matches() {
+        // Vision-positive prefixes
+        assert!(model_supports_vision_hint("gpt-4o"));
+        assert!(model_supports_vision_hint("gpt-4o-mini"));
+        assert!(model_supports_vision_hint("gpt-4o-2024-08-06"));
+        assert!(model_supports_vision_hint("gpt-4-turbo"));
+        assert!(model_supports_vision_hint("gpt-4-turbo-preview"));
+        assert!(model_supports_vision_hint("claude-3-opus"));
+        assert!(model_supports_vision_hint("claude-3-5-sonnet-20241022"));
+        assert!(model_supports_vision_hint("kimi-k2"));
+        assert!(model_supports_vision_hint("kimi-k2-vision"));
+        assert!(model_supports_vision_hint("gemini-1.5-pro"));
+        assert!(model_supports_vision_hint("gemini-2.0-flash"));
+
+        // Vision-negative prefixes
+        assert!(!model_supports_vision_hint("gpt-3.5-turbo"));
+        assert!(!model_supports_vision_hint("gpt-3.5-turbo-16k"));
+        assert!(!model_supports_vision_hint("text-davinci-003"));
+        assert!(!model_supports_vision_hint("llama-2-7b"));
+        assert!(!model_supports_vision_hint("llama-2-70b-chat"));
+
+        // Unknown / unlisted → defaults to true (API-style safe default)
+        assert!(model_supports_vision_hint("some-custom-model"));
+        assert!(model_supports_vision_hint("gpt-5"));
+    }
+
+    #[test]
+    fn test_vision_catalog_by_model_wildcard() {
+        let mut c = Config::default();
+        c.supports_vision = true;
+        c.ignore_vision_model_hint = false;
+
+        // Exact match still works
+        c.vision_by_model.insert("custom-v1".to_string(), true);
+        assert_eq!(
+            catalog_supports_vision_for_model(&c, "custom-v1"),
+            Some(true)
+        );
+        assert_eq!(
+            catalog_supports_vision_for_model(&c, "custom-v2"),
+            None // no wildcard yet
+        );
+
+        // Prefix wildcard
+        c.vision_by_model.insert("custom-*".to_string(), false);
+        assert_eq!(
+            catalog_supports_vision_for_model(&c, "custom-v2"),
+            Some(false)
+        );
+        assert_eq!(
+            catalog_supports_vision_for_model(&c, "custom-v2-beta"),
+            Some(false)
+        );
+
+        // Exact match should still take precedence over wildcard
+        assert_eq!(
+            catalog_supports_vision_for_model(&c, "custom-v1"),
+            Some(true)
+        );
     }
 
     #[test]

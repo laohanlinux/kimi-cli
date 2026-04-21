@@ -90,6 +90,35 @@ impl LLMGeneration for StreamingGeneration {
     }
 }
 
+/// Structured error from an LLM provider, carrying HTTP status code for
+/// precise retry classification (§1.2 L23).
+#[derive(Debug, Clone)]
+pub struct ProviderError {
+    pub status_code: u16,
+    pub body: String,
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Provider error {}: {}", self.status_code, self.body)
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
+impl ProviderError {
+    /// Whether this error is retryable per Python kimi-cli tenacity set:
+    /// 429, 5xx, timeout, connection, empty response.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self.status_code, 429 | 500..=599)
+    }
+
+    /// Whether this error indicates an OAuth token may need refresh.
+    pub fn is_unauthorized(&self) -> bool {
+        self.status_code == 401
+    }
+}
+
 /// Retry configuration for LLM calls.
 #[allow(dead_code)]
 pub struct RetryConfig {
@@ -108,6 +137,19 @@ impl Default for RetryConfig {
     }
 }
 
+fn is_retryable_error(e: &anyhow::Error) -> bool {
+    // Prefer structured provider error for precise status-code matching.
+    if let Some(pe) = e.downcast_ref::<ProviderError>() {
+        return pe.is_retryable();
+    }
+    // Fallback for transport-layer or legacy string errors.
+    let text = e.to_string().to_ascii_lowercase();
+    text.contains("429")
+        || text.contains("timeout")
+        || text.contains("connection")
+        || text.contains("empty response")
+}
+
 /// Execute an async operation with exponential backoff retry.
 #[allow(dead_code)]
 pub async fn with_retry<F, Fut, T>(config: &RetryConfig, operation: F) -> anyhow::Result<T>
@@ -120,12 +162,7 @@ where
         match operation().await {
             Ok(result) => return Ok(result),
             Err(e) => {
-                let err_text = e.to_string();
-                let retryable = err_text.contains("429")
-                    || err_text.contains("timeout")
-                    || err_text.contains("connection")
-                    || err_text.contains("5")
-                    || err_text.contains("empty response");
+                let retryable = is_retryable_error(&e);
                 if !retryable || attempt == config.max_retries {
                     return Err(e);
                 }
@@ -137,7 +174,7 @@ where
                     "LLM call failed (attempt {}/{}): {}. Retrying in {}ms...",
                     attempt + 1,
                     config.max_retries + 1,
-                    err_text,
+                    e,
                     delay
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -151,21 +188,26 @@ where
 /// Create a provider using the identity layer for credential resolution.
 pub async fn create_provider(
     model: &str,
-    identity: &crate::identity::IdentityManager,
+    identity: std::sync::Arc<crate::identity::IdentityManager>,
     session_id: Option<String>,
 ) -> anyhow::Result<Box<dyn ChatProvider>> {
     if model.starts_with("claude") {
-        let api_key = resolve_key(identity, "ANTHROPIC_API_KEY", "KIMI_API_KEY").await?;
+        let (api_key, key_name) =
+            resolve_key(identity.clone(), "ANTHROPIC_API_KEY", "KIMI_API_KEY").await?;
         let base_url = resolve_base_url("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
-        let mut provider = anthropic::AnthropicProvider::new(api_key, base_url, model.to_string());
+        let mut provider =
+            anthropic::AnthropicProvider::new(api_key, base_url, model.to_string());
+        provider = provider.with_identity(identity.clone(), key_name);
         if let Some(sid) = session_id {
             provider = provider.with_session_id(sid);
         }
         Ok(Box::new(provider))
     } else {
-        let api_key = resolve_key(identity, "OPENAI_API_KEY", "KIMI_API_KEY").await?;
+        let (api_key, key_name) =
+            resolve_key(identity.clone(), "OPENAI_API_KEY", "KIMI_API_KEY").await?;
         let base_url = resolve_base_url("OPENAI_BASE_URL", "https://api.openai.com");
         let mut provider = openai::OpenAIProvider::new(api_key, base_url, model.to_string());
+        provider = provider.with_identity(identity.clone(), key_name);
         if let Some(sid) = session_id {
             provider = provider.with_session_id(sid);
         }
@@ -174,22 +216,22 @@ pub async fn create_provider(
 }
 
 async fn resolve_key(
-    identity: &crate::identity::IdentityManager,
+    identity: std::sync::Arc<crate::identity::IdentityManager>,
     primary: &str,
     fallback: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, String)> {
     if let Ok(Some(cred)) = identity.get_key(primary).await {
-        return Ok(cred.value);
+        return Ok((cred.value, primary.to_string()));
     }
     if let Ok(Some(cred)) = identity.get_key(fallback).await {
-        return Ok(cred.value);
+        return Ok((cred.value, fallback.to_string()));
     }
     // Final fallback: direct env var (for backward compat)
     for var in [primary, fallback] {
         if let Ok(val) = std::env::var(var)
             && !val.is_empty()
         {
-            return Ok(val);
+            return Ok((val, var.to_string()));
         }
     }
     anyhow::bail!(
@@ -322,6 +364,76 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_provider_error_retryable_status_codes() {
+        assert!(ProviderError { status_code: 429, body: "".into() }.is_retryable());
+        assert!(ProviderError { status_code: 500, body: "".into() }.is_retryable());
+        assert!(ProviderError { status_code: 502, body: "".into() }.is_retryable());
+        assert!(ProviderError { status_code: 503, body: "".into() }.is_retryable());
+        assert!(!ProviderError { status_code: 400, body: "".into() }.is_retryable());
+        assert!(!ProviderError { status_code: 401, body: "".into() }.is_retryable());
+        assert!(!ProviderError { status_code: 403, body: "".into() }.is_retryable());
+        assert!(!ProviderError { status_code: 404, body: "".into() }.is_retryable());
+    }
+
+    #[test]
+    fn test_provider_error_unauthorized() {
+        assert!(ProviderError { status_code: 401, body: "".into() }.is_unauthorized());
+        assert!(!ProviderError { status_code: 403, body: "".into() }.is_unauthorized());
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_structured_provider_error() {
+        let config = RetryConfig {
+            max_retries: 2,
+            base_delay_ms: 1,
+            max_delay_ms: 10,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let result = with_retry(&config, move || {
+            let a = attempts_clone.clone();
+            async move {
+                let count = a.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if count < 2 {
+                    Err(ProviderError {
+                        status_code: 503,
+                        body: "overloaded".into(),
+                    }.into())
+                } else {
+                    Ok("ok")
+                }
+            }
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_retry_gives_up_on_structured_4xx() {
+        let config = RetryConfig {
+            max_retries: 2,
+            base_delay_ms: 1,
+            max_delay_ms: 10,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let result: Result<&str, _> = with_retry(&config, move || {
+            let a = attempts_clone.clone();
+            async move {
+                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProviderError {
+                    status_code: 400,
+                    body: "bad request".into(),
+                }.into())
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

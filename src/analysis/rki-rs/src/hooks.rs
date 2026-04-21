@@ -260,4 +260,91 @@ mod tests {
             .unwrap();
         assert_eq!(result.decision, EffectDecision::Allow);
     }
+
+    /// Non-critical hook failure logs a warning and returns Allow.
+    struct FailingNonCriticalEffect {
+        name: String,
+    }
+
+    #[async_trait]
+    impl SideEffect for FailingNonCriticalEffect {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn stage(&self) -> HookStage {
+            HookStage::PreValidate
+        }
+        fn is_critical(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            _event: &str,
+            _payload: &serde_json::Value,
+        ) -> anyhow::Result<SideEffectResult> {
+            anyhow::bail!("non-critical oops")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_critical_hook_failure_allows() {
+        let engine = SideEffectEngine::new();
+        engine.register(std::sync::Arc::new(FailingNonCriticalEffect {
+            name: "flaky".into(),
+        }));
+        let result = engine
+            .run(HookStage::PreValidate, "tool_call", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.decision, EffectDecision::Allow);
+    }
+
+    /// First Allow, then Block — Block should win with the blocking hook's name in the reason.
+    struct NamedBlockEffect {
+        name: String,
+        reason: String,
+    }
+
+    #[async_trait]
+    impl SideEffect for NamedBlockEffect {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn stage(&self) -> HookStage {
+            HookStage::PreValidate
+        }
+        fn is_critical(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            _event: &str,
+            _payload: &serde_json::Value,
+        ) -> anyhow::Result<SideEffectResult> {
+            Ok(SideEffectResult::block(&self.reason))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mixed_allow_block_first_block_wins() {
+        let engine = SideEffectEngine::new();
+        engine.register(std::sync::Arc::new(FailingNonCriticalEffect {
+            name: "allower".into(),
+        })); // returns Allow (via Err, which for non-critical becomes Allow)
+        engine.register(std::sync::Arc::new(NamedBlockEffect {
+            name: "blocker".into(),
+            reason: "no way".into(),
+        }));
+        let result = engine
+            .run(HookStage::PreValidate, "tool_call", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(matches!(result.decision, EffectDecision::Block { .. }));
+        let reason = match result.decision {
+            EffectDecision::Block { reason } => reason,
+            _ => panic!("expected Block"),
+        };
+        assert!(reason.contains("blocker"), "reason should name blocking hook: {}", reason);
+        assert!(reason.contains("no way"), "reason should contain hook reason: {}", reason);
+    }
 }

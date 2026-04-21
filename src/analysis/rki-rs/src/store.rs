@@ -449,6 +449,11 @@ impl Store {
         }
     }
 
+    /// Maximum wire events retained per session before tail-compaction triggers.
+    const WIRE_EVENTS_TRIM_THRESHOLD: usize = 10_000;
+    /// Target count after tail-compaction.
+    const WIRE_EVENTS_TRIM_TARGET: usize = 8_000;
+
     pub fn append_wire_event(
         &self,
         session_id: &str,
@@ -460,6 +465,20 @@ impl Store {
             "INSERT INTO wire_events (session_id, event_type, payload, created_at) VALUES (?1, ?2, ?3, datetime('now'))",
             params![session_id, event_type, payload],
         )?;
+        // Opportunistic tail compaction (§6.5): keep recent events, discard oldest.
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM wire_events WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        if count > Self::WIRE_EVENTS_TRIM_THRESHOLD as i64 {
+            conn.execute(
+                "DELETE FROM wire_events WHERE session_id = ?1 AND id <= (
+                    SELECT id FROM wire_events WHERE session_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2
+                )",
+                params![session_id, Self::WIRE_EVENTS_TRIM_TARGET],
+            )?;
+        }
         Ok(())
     }
 
@@ -1127,6 +1146,55 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].1, "TurnBegin");
         assert_eq!(events[1].2, r#"{"text":"world"}"#);
+    }
+
+    #[test]
+    fn test_wire_events_tail_compaction() {
+        let store = test_store();
+        store.create_session("s1", "/tmp").unwrap();
+
+        let threshold = Store::WIRE_EVENTS_TRIM_THRESHOLD;
+        let target = Store::WIRE_EVENTS_TRIM_TARGET;
+
+        // Insert enough events to trigger compaction on the last append.
+        for i in 0..=threshold {
+            store
+                .append_wire_event("s1", "TextPart", &format!(r#"{{"n":{i}}}"#))
+                .unwrap();
+        }
+
+        let events = store.get_wire_events("s1").unwrap();
+        // After trimming, we should have roughly (target + 1) events left
+        // (target from the subquery offset + the row that triggered the delete).
+        assert!(
+            events.len() <= target + 100,
+            "expected <= {} events after trim, got {}",
+            target + 100,
+            events.len()
+        );
+        assert!(
+            events.len() >= target - 100,
+            "expected >= {} events after trim, got {}",
+            target - 100,
+            events.len()
+        );
+
+        // The oldest remaining event should be near the trim boundary.
+        let first_n: i64 = serde_json::from_str::<serde_json::Value>(&events[0].2)
+            .unwrap()["n"]
+            .as_i64()
+            .unwrap();
+        assert!(
+            first_n >= (threshold - target - 100) as i64,
+            "oldest remaining event n={first_n} should be near boundary"
+        );
+
+        // The newest event should always be preserved.
+        let last_n: i64 = serde_json::from_str::<serde_json::Value>(&events.last().unwrap().2)
+            .unwrap()["n"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(last_n, threshold as i64);
     }
 
     #[test]

@@ -444,6 +444,72 @@ pub fn compare_tool() -> FunctionTool {
     )
 }
 
+/// Stateless function tool: display — show formatted content to the user (§3.3).
+pub fn display_tool() -> FunctionTool {
+    FunctionTool::new(
+        "display",
+        "Display formatted content to the user interface",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": { "type": "string", "description": "Content to display" },
+                "format": {
+                    "type": "string",
+                    "enum": ["text", "markdown", "html", "json"],
+                    "description": "Format hint for the UI"
+                },
+                "title": { "type": "string", "description": "Optional title" }
+            },
+            "required": ["content"]
+        }),
+        |args: Value, ctx: &ToolContext| {
+            let ctx = ctx.clone();
+            async move {
+                let content = args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let format = args
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("text")
+                    .to_string();
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(hub) = &ctx.hub {
+                    hub.broadcast(crate::wire::WireEvent::TextPart {
+                        text: format!(
+                            "\n---\n{}Display ({}):\n{}\n---\n",
+                            if title.is_empty() {
+                                "".to_string()
+                            } else {
+                                format!("{} ", title)
+                            },
+                            format,
+                            content
+                        ),
+                    });
+                }
+                Ok(ToolOutput {
+                    result: ToolResult {
+                        r#type: "success".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: content.clone(),
+                        }],
+                        summary: format!("Displayed {} chars ({})", content.len(), format),
+                    },
+                    artifacts: vec![],
+                    metrics: ToolMetrics::default(),
+                })
+            }
+        },
+    )
+}
+
 /// Stateless function tool: panic — raise an error after 2 seconds (test diagnostic).
 pub fn panic_tool() -> FunctionTool {
     FunctionTool::new(
@@ -634,5 +700,61 @@ mod tests {
         assert!(err.contains("panicked"));
         assert!(err.contains("5 characters"));
         assert!(elapsed >= std::time::Duration::from_secs(2), "panic tool should sleep 2s");
+    }
+
+    #[tokio::test]
+    async fn test_display_tool() {
+        let tool = display_tool();
+        let ctx = test_ctx();
+        let out = tool
+            .call(
+                serde_json::json!({"content": "Hello world", "format": "markdown", "title": "Greeting"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.result.r#type, "success");
+        assert!(out.result.summary.contains("Displayed"));
+        assert!(out.result.summary.contains("markdown"));
+        assert_eq!(out.result.content, vec![ContentBlock::Text { text: "Hello world".to_string() }]);
+        assert_eq!(tool.name(), "display");
+    }
+
+    #[tokio::test]
+    async fn test_display_tool_broadcasts_on_hub() {
+        let hub = crate::wire::RootWireHub::new();
+        let mut rx = hub.subscribe();
+        let store = crate::store::Store::open(std::path::Path::new(":memory:")).unwrap();
+        let ctx = ToolContext {
+            hub: Some(hub),
+            token: crate::token::ContextToken::new("test", "test-turn"),
+            runtime: crate::runtime::Runtime::new(
+                crate::config::Config::default(),
+                crate::session::Session::create(&store, std::env::current_dir().unwrap()).unwrap(),
+                std::sync::Arc::new(crate::approval::ApprovalRuntime::new(
+                    crate::wire::RootWireHub::new(),
+                    true,
+                    vec![],
+                )),
+                crate::wire::RootWireHub::new(),
+                store,
+            ),
+        };
+        let tool = display_tool();
+        let _out = tool
+            .call(
+                serde_json::json!({"content": "broadcast me", "format": "text"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let envelope = rx.recv().await.unwrap();
+        if let crate::wire::WireEvent::TextPart { text } = envelope.event {
+            assert!(text.contains("broadcast me"));
+            assert!(text.contains("Display"));
+        } else {
+            panic!("Expected TextPart, got {:?}", envelope.event);
+        }
     }
 }

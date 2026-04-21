@@ -35,7 +35,7 @@
 |------|------|---------|---------------|---------------|
 | Lifecycle L01–L35 | 15 | 13 | 5 | 2 |
 | Section rows S 1.1–S B | 6 | 38 | 4 | 8 |
-| Builtin tools §3.3 detail | 10 | 6 | 0 | 0 |
+| Builtin tools §3.3 detail | 10 | 7 | 0 | 0 |
 
 ---
 
@@ -62,10 +62,10 @@
 | L17 | Checkpoints in context store | AS-IS | `context.py` | `context.rs`, `store.rs` | Partial | `context`, `store` tests | Format differs from pure JSONL file; **document**. |
 | L18 | Append user message | AS-IS | `context.py` | `context.rs` (`UserMessage` persistence: plain string vs `{"parts":...}` JSON), `orchestrator.rs` (`TurnInput` → `Message::User`) | Partial | `message::test_user_message_persistent_roundtrip`, orchestrator tests | |
 | L19 | Agent loop: MCP defer, max steps, StepBegin, compaction | AS-IS | `kimisoul.py`, `compaction.py` | `orchestrator.rs`, `compaction.rs`, `mcp/` | Partial | `orchestrator::tests::*`, `compaction` | Step cap / compaction thresholds may differ. |
-| L20 | Notifications → context (claim batch) | AS-IS | `notifications/`, soul loop | `notification/manager.rs`, orchestrator | Partial | `notification`, orchestrator tests | Batch size / semantics: verify vs Python `4`. |
+| L20 | Notifications → context (claim batch) | AS-IS | `notifications/`, soul loop | `notification/manager.rs`, orchestrator | Partial | `notification`, `orchestrator::test_notifications_claimed_and_batched_into_context` | Batch size = 4 verified at manager and orchestrator levels. Claim → context append → ack pipeline tested end-to-end. |
 | L21 | Plan / YOLO dynamic injection | AS-IS | `soul/dynamic_injection*.py` | `injection.rs` | Partial | `injection` tests | |
 | L22 | Merge adjacent user messages | AS-IS | `kimisoul.py` | `message.rs` (`merge_adjacent_user_messages`), `orchestrator.rs` | Done | `message::test_merge_adjacent_user_messages`, orchestrator uses merge before LLM | |
-| L23 | LLM call + retries + OAuth | AS-IS | `kosong`, `llm.py` | `llm.rs`, `identity/oauth.rs` | Partial | `identity/oauth.rs` unit tests | Compare retry list to tenacity set in spec. |
+| L23 | LLM call + retries + OAuth | AS-IS | `kosong`, `llm.py` | `llm.rs`, `identity/oauth.rs` | Partial | `identity/oauth.rs` tests, `test_identity_manager_refresh_persists_to_store`, `test_openai_provider_401_*` | Retry list matches tenacity set (429, 5xx, timeout, connection, empty response). **OAuth 401 refresh**: providers hold `Arc<IdentityManager>` + key name; `send_with_refresh` attempts `identity.refresh()` once on 401 and retries the request. |
 | L24 | StatusUpdate (tokens, plan, MCP) | AS-IS | wire / soul | `wire.rs`, orchestrator | Partial | wire event tests | Field parity with Python wire types. |
 | L25 | Concurrent tool execution | AS-IS | `toolset.py` | `toolset.rs`, orchestrator | Partial | tool + orchestrator tests | |
 | L26 | Plan mode change mid-step → status refresh | AS-IS | `kimisoul.py` | `orchestrator.rs` (`StatusUpdate.plan_mode` from `runtime.is_plan_mode`) | Done | `orchestrator::test_status_update_reflects_plan_mode_after_plan_tool` | Mid-step tool can flip plan; end-of-step status reflects it. |
@@ -74,7 +74,7 @@
 | L29 | D-Mail / BackToTheFuture | AS-IS | `denwarenji.py`, tools | `soul/denwa_renji.rs`, `tools/misc.rs` | Partial | soul error tests | |
 | L30 | Steer queue | AS-IS | steer integration | `steer.rs` | Partial | `test_react_orchestrator_consumes_steers` | |
 | L31 | No tool calls → end turn | AS-IS | `kimisoul.py` | `orchestrator.rs` | Done | `test_react_orchestrator_echo`, Ralph fast-path tests | |
-| L32 | Stop hook + max re-trigger | AS-IS | `hooks/` | `hooks.rs` | Partial | structured-effects tests in orchestrator | |
+| L32 | Stop hook + max re-trigger | AS-IS | `hooks/` | `hooks.rs` | Partial | `hooks::tests::*` (engine), `orchestrator::tests::*` (integration): `test_prevalidate_block_stops_tool`, `test_postexecute_hook_runs_on_success`, `test_audit_hook_runs_for_every_tool`, `test_critical_hook_failure_propagates`, `test_postexecute_failure_hook_runs_on_tool_error`, `test_non_critical_failure_does_not_stop_turn`, `test_structured_effects_preexecute_block_skips_tool`, `test_preexecute_block_ignored_without_structured_effects_flag`, `soul::test_stop_hook_re_trigger_max_once`, `soul::test_stop_hook_no_re_trigger_when_already_active` | PreValidate/PreExecute/PostExecute/PostExecuteFailure/Audit/Stop stages covered. Non-critical failure path tested. |
 | L33 | TurnEnd | AS-IS | wire | `soul.rs`, `wire.rs` | Done | soul + wire tests | |
 | L34 | Auto session title | AS-IS | `session.py` | `session.rs` | Partial | `test_soul_auto_title_after_turn` | May use DB not wire file scan. |
 | L35 | Soul cleanup: wire flush, tasks | AS-IS | `run_soul` | `main.rs` (`WireEvent::SessionShutdown` then `TurnEnd`, `RKI_UI_SHUTDOWN_WAIT_SECS` + `ui_task` join), `ui.rs` | Partial | `wire::test_session_shutdown_serde_roundtrip`, `stream::test_session_stream_persist_row_uses_serde_type_key`, `golden_wire` + `session_shutdown.jsonl` | Reasons: `print_mode_complete`, `print_mode_empty_stdin`, `interactive_exit`. Bounded join unchanged (`RKI_UI_SHUTDOWN_WAIT_SECS`). |
@@ -90,7 +90,7 @@
 | S 1.3 | 1.3 | Structural invariants | AS-IS | `wire/root_hub.py`, `context.py` | `wire.rs`, `context.rs`, `approval.rs` | Partial | wire + approval tests | ContextVars → `ContextToken` (§5.3). |
 | S 2.1 | 2.1 | User → LLM → response trace | AS-IS | `kimisoul.py` | `orchestrator.rs`, `soul.rs` | Partial | orchestrator tests | |
 | S 2.2 | 2.2 | Wire taxonomy | AS-IS | `wire/types.py`, `protocol.py` | `wire.rs` | Partial | `wire` tests | Compare enum coverage. |
-| S 2.3 | 2.3 | Wire merge behavior | AS-IS | wire merge / UI | `wire.rs` (`MergedWireReceiver`, `merge_event`) | Partial | `test_wire_merged_receiver_*` | Spec coalescing rules: extend tests for parity. |
+| S 2.3 | 2.3 | Wire merge behavior | AS-IS | wire merge / UI | `wire.rs` (`MergedWireReceiver`, `merge_event`) | Partial | `test_wire_merged_receiver_*` (9 tests) | TextPart+TextPart, ThinkPart+ThinkPart, cross-type flush, empty text, non-mergeable flush, large buffer (100 events), long mixed sequences, empty text flushed by non-mergeable. |
 | S 2.4 | 2.4 | Approval flow | AS-IS | `approval_runtime/` | `approval.rs` | Partial | `approval::tests::*` | Capability + legacy paths. |
 | S 2.5 | 2.5 | Session persistence | AS-IS | `session.py`, stores | `session.rs`, `store.rs` | Partial | `store::tests::*`, `session::tests::*` | Rust uses SQLite session DB + dirs. |
 | S 2.6 | 2.6 | Subagent data flow | AS-IS | `subagents/` | `subagents/`, `tools/agent.rs` | Partial | `subagents/runner.rs` tests | `subagents/store.rs` exists; parity with Python store TBD. |
@@ -103,7 +103,7 @@
 | S 4.2 | 4.2 | LLM abstraction | AS-IS | `llm.py`, kosong | `llm.rs`, providers | Partial | orchestrator + llm tests | |
 | S 4.3 | 4.3 | Background tasks | AS-IS | `background/` | `background/` | Partial | `background/*` tests | Distributed caps behind feature flag §8.3. |
 | S 4.4 | 4.4 | Notifications | AS-IS | `notifications/` | `notification/` | Partial | notification tests, §8.4 wire tail | |
-| S 4.5 | 4.5 | Auth / security | AS-IS | `auth/` | `identity.rs`, `identity/oauth.rs`, `acp.rs` (`RKI_ACP_TOKEN` bearer for ACP) | Partial | `identity/oauth.rs` tests, `acp` bearer tests | ACP shared secret is transport-level only (not OAuth). |
+| S 4.5 | 4.5 | Auth / security | AS-IS | `auth/` | `identity.rs`, `identity/oauth.rs`, `acp.rs` (`RKI_ACP_TOKEN` bearer for ACP) | Partial | `identity/oauth.rs` tests, `test_identity_manager_refresh_persists_to_store`, `test_openai_provider_401_*`, `acp` bearer tests | ACP shared secret is transport-level only (not OAuth). LLM providers (`OpenAIProvider`, `AnthropicProvider`) now attempt token refresh on 401 via `IdentityManager::refresh`. |
 | S 4.6 | 4.6 | Compaction | AS-IS | `soul/compaction.py` | `compaction.rs` | Partial | `compaction.rs` unit tests | Threshold behavior: align with tests. |
 | S 4.7 | 4.7 | Checkpoint / D-Mail | AS-IS | `context.py`, `tools/dmail/` | `context.rs`, `denwa_renji.rs`, `tools/misc.rs` | Partial | soul + tools tests | |
 | S 4.8 | 4.8 | Hooks | AS-IS | `hooks/` | `hooks.rs` | Partial | orchestrator hook tests | Structured effects §6.2. |
@@ -152,7 +152,7 @@
 | agent (subagent) | `tools/agent/` | `tools/agent.rs` | Partial | `tools/agent` tests | Uses `ForegroundSubagentRunner`. |
 | plan enter/exit tools | `tools/plan/` | `tools/plan.rs` | Partial | plan tool tests | |
 | background task tools | `tools/background/` | `tools/task.rs` | Partial | task tests | Maps to task_list/output/stop. |
-| test / display | `tools/test.py`, `display.py` | partial `tools/misc.rs` | Not started | — | Audit if needed. |
+| test / display | `tools/test.py`, `display.py` | `tools/misc.rs` (`display_tool`, `panic_tool`, `plus_tool`, `compare_tool`) | Partial | `test_display_tool`, `test_display_tool_broadcasts_on_hub`, misc tests | `display_tool` broadcasts via hub; diagnostic tools (`panic`, `plus`, `compare`) cover Python `test.py` roles. |
 | manifest discovery | — (plugin) | `tools/manifest.rs` | Partial | manifest tests | §7.1 overlap. |
 | function_toolkit | — | `tools/function_toolkit.rs` | Partial | function_toolkit tests | Dynamic JSON-schema tools. |
 

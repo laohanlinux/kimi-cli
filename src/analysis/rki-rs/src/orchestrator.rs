@@ -452,7 +452,15 @@ impl ReActOrchestrator {
                     Err(e) => {
                         let is_rejected = e.downcast_ref::<crate::tools::ToolRejected>().is_some();
                         if is_rejected {
-                            any_rejected = true;
+                            // §1.2 L28: only trigger tool_rejected stop_reason when
+                            // the rejection has no user feedback (and is not a subagent).
+                            let has_feedback = e
+                                .downcast_ref::<crate::tools::ToolRejected>()
+                                .map(|tr| tr.has_feedback)
+                                .unwrap_or(false);
+                            if !has_feedback {
+                                any_rejected = true;
+                            }
                         }
                         hub.broadcast(WireEvent::ToolResult {
                             tool_call_id: tc.id.clone(),
@@ -1200,6 +1208,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_rejected_with_feedback_does_not_stop_turn() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+
+        // Register a tool that rejects WITH feedback
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::FunctionTool::new(
+                "reject_with_feedback",
+                "A tool that rejects with feedback",
+                serde_json::json!({"type": "object", "properties": {}}),
+                |_args: serde_json::Value, _ctx: &crate::tools::ToolContext| async move {
+                    Err(crate::tools::ToolRejected {
+                        reason: "rejected but user was asked".to_string(),
+                        has_feedback: true,
+                    }.into())
+                },
+            )));
+        }
+
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+
+        struct FeedbackRejectCallProvider;
+        #[async_trait]
+        impl ChatProvider for FeedbackRejectCallProvider {
+            async fn generate(
+                &self,
+                _system_prompt: Option<String>,
+                _history: Vec<Message>,
+                _tools: Vec<serde_json::Value>,
+            ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![ContentPart::Text { text: "done".to_string() }],
+                    vec![ToolCall {
+                        id: "tc-1".to_string(),
+                        kind: "function".to_string(),
+                        function: FunctionCall {
+                            name: "reject_with_feedback".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    }],
+                    None,
+                )))
+            }
+        }
+
+        let llm: Arc<dyn ChatProvider> = Arc::new(FeedbackRejectCallProvider);
+        let hub = RootWireHub::new();
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("call rejecting tool with feedback"),
+                &hub,
+                token,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        // When has_feedback=true, the turn should NOT end with tool_rejected
+        let stop_reason = result.unwrap().stop_reason;
+        assert_ne!(
+            stop_reason, "tool_rejected",
+            "Tool rejection with user feedback should not trigger tool_rejected stop_reason"
+        );
+    }
+
+    #[tokio::test]
     async fn test_step_wire_offset_tail_broadcasts_notification() {
         let runtime = test_runtime();
         let hub = runtime.hub.clone();
@@ -1640,8 +1732,18 @@ mod tests {
         }
     }
 
-    /// LLM that always emits a single `think` tool call.
-    struct ThinkCallProvider;
+    /// LLM that emits a `think` tool call on first generate, then no tool calls.
+    struct ThinkCallProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ThinkCallProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
 
     #[async_trait]
     impl ChatProvider for ThinkCallProvider {
@@ -1651,20 +1753,29 @@ mod tests {
             _history: Vec<Message>,
             _tools: Vec<serde_json::Value>,
         ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
-            Ok(Box::new(HttpGeneration::new(
-                vec![ContentPart::Text {
-                    text: "calling think".to_string(),
-                }],
-                vec![ToolCall {
-                    id: "tc1".to_string(),
-                    kind: "function".to_string(),
-                    function: FunctionCall {
-                        name: "think".to_string(),
-                        arguments: r#"{"thought":"hmm"}"#.to_string(),
-                    },
-                }],
-                None,
-            )))
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![ContentPart::Text {
+                        text: "calling think".to_string(),
+                    }],
+                    vec![ToolCall {
+                        id: "tc1".to_string(),
+                        kind: "function".to_string(),
+                        function: FunctionCall {
+                            name: "think".to_string(),
+                            arguments: r#"{"thought":"hmm"}"#.to_string(),
+                        },
+                    }],
+                    None,
+                )))
+            } else {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![ContentPart::Text { text: "done".to_string() }],
+                    vec![],
+                    None,
+                )))
+            }
         }
     }
 
@@ -1712,7 +1823,7 @@ mod tests {
         };
         let hub = RootWireHub::new();
         let mut rx = hub.subscribe();
-        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider);
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider::new());
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         orch.execute_turn(
@@ -1767,7 +1878,7 @@ mod tests {
         };
         let hub = RootWireHub::new();
         let mut rx = hub.subscribe();
-        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider);
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider::new());
         let orch = ReActOrchestrator;
         let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
         orch.execute_turn(
@@ -1793,6 +1904,569 @@ mod tests {
                 .any(|(err, o)| !err && !o.contains("Blocked by hook")),
             "expected successful tool run ignoring PreExecute block, got {:?}",
             tool_results
+        );
+    }
+
+    /// PreValidate side effect that blocks the `think` tool.
+    struct BlockThinkPreValidate;
+
+    #[async_trait]
+    impl SideEffect for BlockThinkPreValidate {
+        fn name(&self) -> &str {
+            "block_think_pre_validate"
+        }
+        fn stage(&self) -> HookStage {
+            HookStage::PreValidate
+        }
+        fn is_critical(&self) -> bool {
+            false
+        }
+
+        async fn execute(
+            &self,
+            _event: &str,
+            payload: &serde_json::Value,
+        ) -> anyhow::Result<SideEffectResult> {
+            if payload.get("tool").and_then(|t| t.as_str()) == Some("think") {
+                return Ok(SideEffectResult::block("no think in prevalidate"));
+            }
+            Ok(SideEffectResult::allow())
+        }
+    }
+
+    /// Counter side effect for verifying stage invocation.
+    struct CountingEffect {
+        stage: HookStage,
+        name: String,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SideEffect for CountingEffect {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn stage(&self) -> HookStage {
+            self.stage
+        }
+        fn is_critical(&self) -> bool {
+            false
+        }
+
+        async fn execute(
+            &self,
+            _event: &str,
+            _payload: &serde_json::Value,
+        ) -> anyhow::Result<SideEffectResult> {
+            self.counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(SideEffectResult::allow())
+        }
+    }
+
+    /// Critical side effect that always fails.
+    struct FailingCriticalEffect;
+
+    #[async_trait]
+    impl SideEffect for FailingCriticalEffect {
+        fn name(&self) -> &str {
+            "failing_critical"
+        }
+        fn stage(&self) -> HookStage {
+            HookStage::PreValidate
+        }
+        fn is_critical(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _event: &str,
+            _payload: &serde_json::Value,
+        ) -> anyhow::Result<SideEffectResult> {
+            anyhow::bail!("critical failure")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prevalidate_block_stops_tool() {
+        let runtime = test_runtime();
+        runtime
+            .hooks
+            .register(std::sync::Arc::new(BlockThinkPreValidate));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::misc::ThinkTool));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec!["think".to_string()],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider::new());
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let mut events = Vec::new();
+        while let Ok(envelope) = rx.try_recv() {
+            events.push(envelope.event);
+        }
+        let tool_results = collect_tool_results(&events);
+        assert_eq!(tool_results.len(), 1);
+        assert!(
+            tool_results[0].0 && tool_results[0].1.contains("Blocked by hook"),
+            "expected PreValidate block, got {:?}",
+            tool_results
+        );
+    }
+
+    #[tokio::test]
+    async fn test_postexecute_hook_runs_on_success() {
+        let runtime = test_runtime();
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.hooks.register(std::sync::Arc::new(CountingEffect {
+            stage: HookStage::PostExecute,
+            name: "post_exec_counter".into(),
+            counter: counter.clone(),
+        }));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::misc::ThinkTool));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec!["think".to_string()],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider::new());
+        let hub = RootWireHub::new();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "PostExecute should run once after successful tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audit_hook_runs_for_every_tool() {
+        let runtime = test_runtime();
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.hooks.register(std::sync::Arc::new(CountingEffect {
+            stage: HookStage::Audit,
+            name: "audit_counter".into(),
+            counter: counter.clone(),
+        }));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::misc::ThinkTool));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec!["think".to_string()],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider::new());
+        let hub = RootWireHub::new();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Audit should run once per tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_critical_hook_failure_propagates() {
+        let runtime = test_runtime();
+        runtime
+            .hooks
+            .register(std::sync::Arc::new(FailingCriticalEffect));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::misc::ThinkTool));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec!["think".to_string()],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider::new());
+        let hub = RootWireHub::new();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
+            .await;
+
+        assert!(result.is_err(), "Critical hook failure should propagate");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("critical failure"),
+            "expected critical failure in error, got {}",
+            err
+        );
+    }
+
+    /// Tool that always fails immediately (for PostExecuteFailure testing).
+    struct FailingTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for FailingTool {
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn description(&self) -> &str {
+            "Always fails"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+        async fn call(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tools::ToolContext,
+        ) -> anyhow::Result<crate::tools::ToolOutput> {
+            anyhow::bail!("intentional failure")
+        }
+    }
+
+    /// LLM that emits a `fail` tool call on first generate, then no tool calls.
+    struct FailingToolCallProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailingToolCallProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatProvider for FailingToolCallProvider {
+        async fn generate(
+            &self,
+            _system_prompt: Option<String>,
+            _history: Vec<Message>,
+            _tools: Vec<serde_json::Value>,
+        ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![ContentPart::Text { text: "calling fail".to_string() }],
+                    vec![ToolCall {
+                        id: "tc-fail".to_string(),
+                        kind: "function".to_string(),
+                        function: FunctionCall {
+                            name: "fail".to_string(),
+                            arguments: r#"{}"#.to_string(),
+                        },
+                    }],
+                    None,
+                )))
+            } else {
+                Ok(Box::new(HttpGeneration::new(
+                    vec![ContentPart::Text { text: "done".to_string() }],
+                    vec![],
+                    None,
+                )))
+            }
+        }
+    }
+
+    /// Non-critical hook that always fails.
+    struct FailingNonCriticalEffect;
+
+    #[async_trait]
+    impl crate::hooks::SideEffect for FailingNonCriticalEffect {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+        fn stage(&self) -> crate::hooks::HookStage {
+            crate::hooks::HookStage::PreValidate
+        }
+        fn is_critical(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            _event: &str,
+            _payload: &serde_json::Value,
+        ) -> anyhow::Result<crate::hooks::SideEffectResult> {
+            anyhow::bail!("non-critical oops")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_postexecute_failure_hook_runs_on_tool_error() {
+        let runtime = test_runtime();
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.hooks.register(std::sync::Arc::new(CountingEffect {
+            stage: HookStage::PostExecuteFailure,
+            name: "post_fail_counter".into(),
+            counter: counter.clone(),
+        }));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(FailingTool));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec!["fail".to_string()],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(FailingToolCallProvider::new());
+        let hub = RootWireHub::new();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "PostExecuteFailure should run once when tool fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_critical_failure_does_not_stop_turn() {
+        let runtime = test_runtime();
+        runtime
+            .hooks
+            .register(std::sync::Arc::new(FailingNonCriticalEffect));
+        {
+            let mut ts = runtime.toolset.lock().await;
+            ts.register(Box::new(crate::tools::misc::ThinkTool));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec!["think".to_string()],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(ThinkCallProvider::new());
+        let hub = RootWireHub::new();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("hello"),
+                &hub,
+                token,
+            )
+            .await;
+
+        assert!(result.is_ok(), "Non-critical hook failure should not stop the turn");
+    }
+
+    #[tokio::test]
+    async fn test_notifications_claimed_and_batched_into_context() {
+        let runtime = test_runtime();
+        let hub = runtime.hub.clone();
+
+        // Publish 5 notifications
+        for i in 0..5 {
+            runtime
+                .notifications
+                .publish(NotificationEvent {
+                    category: "test".to_string(),
+                    kind: format!("notif-{}", i),
+                    severity: "info".to_string(),
+                    payload: serde_json::json!({}),
+                    title: format!("Title {}", i),
+                    source_kind: "orchestrator".to_string(),
+                    dedupe_key: Some(format!("dk-{}", i)),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch.execute_turn(
+            &agent,
+            context.clone(),
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
+
+        // Count notification-derived messages in context history
+        let ctx = context.lock().await;
+        let history = ctx.history();
+        let notif_msgs: Vec<_> = history
+            .iter()
+            .filter(|m| {
+                if let Message::User(u) = m {
+                    u.flatten_for_recall().contains("<notification")
+                } else {
+                    false
+                }
+            })
+            .collect();
+        assert_eq!(
+            notif_msgs.len(),
+            4,
+            "Expected exactly 4 notification messages in context (batch limit), got {}",
+            notif_msgs.len()
+        );
+        drop(ctx);
+
+        // Verify the 5th notification is still pending
+        let remaining = runtime.notifications.claim("llm").await;
+        assert_eq!(
+            remaining.len(),
+            1,
+            "Expected 1 remaining notification after batch of 4, got {}",
+            remaining.len()
         );
     }
 

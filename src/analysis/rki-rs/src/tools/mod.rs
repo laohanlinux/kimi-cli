@@ -44,7 +44,8 @@ pub use function_toolkit::{FunctionTool, FunctionToolBuilder};
 pub use manifest::{ManifestTool, discover_manifests};
 pub use misc::{
     AskUserQuestionTool, SendDMailTool, SetTodoListTool, ThinkTool, ask_user_question_tool,
-    compare_tool, panic_tool, plus_tool, send_dmail_tool, set_todo_list_tool, think_tool,
+    compare_tool, display_tool, panic_tool, plus_tool, send_dmail_tool, set_todo_list_tool,
+    think_tool,
 };
 pub use plan::{EnterPlanModeTool, ExitPlanModeTool, enter_plan_mode_tool, exit_plan_mode_tool};
 pub use shell::ShellTool;

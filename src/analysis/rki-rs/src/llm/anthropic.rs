@@ -1,4 +1,4 @@
-use crate::llm::{ChatProvider, HttpGeneration, StreamingGeneration};
+use crate::llm::{ChatProvider, HttpGeneration, ProviderError, StreamingGeneration};
 use crate::message::{
     ContentPart, FunctionCall, Message, ToolCall, UserMessage, content_to_string,
 };
@@ -9,27 +9,81 @@ use reqwest::Client;
 
 pub struct AnthropicProvider {
     client: Client,
-    api_key: String,
+    api_key: std::sync::Mutex<String>,
     base_url: String,
     model: String,
     /// Session affinity for Anthropic (metadata.user_id).
     session_id: Option<String>,
+    identity: Option<std::sync::Arc<crate::identity::IdentityManager>>,
+    key_name: String,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: String, base_url: String, model: String) -> Self {
         Self {
             client: Client::new(),
-            api_key,
+            api_key: std::sync::Mutex::new(api_key),
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
             session_id: None,
+            identity: None,
+            key_name: String::new(),
         }
     }
 
     pub fn with_session_id(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
         self
+    }
+
+    pub fn with_identity(
+        mut self,
+        identity: std::sync::Arc<crate::identity::IdentityManager>,
+        key_name: String,
+    ) -> Self {
+        self.identity = Some(identity);
+        self.key_name = key_name;
+        self
+    }
+
+    /// Send a request, refreshing the token once on 401 if identity is configured.
+    async fn send_with_refresh(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<reqwest::Response> {
+        let key = self.api_key.lock().unwrap().clone();
+        let resp = self
+            .client
+            .post(url)
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01")
+            .json(body)
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 401 {
+            if let Some(ref identity) = self.identity {
+                if let Ok(Some(cred)) = identity.get_key(&self.key_name).await {
+                    if let Ok(new_cred) = identity.refresh(&cred).await {
+                        {
+                            let mut api_key = self.api_key.lock().unwrap();
+                            *api_key = new_cred.value.clone();
+                        }
+                        let resp2 = self
+                            .client
+                            .post(url)
+                            .header("x-api-key", &new_cred.value)
+                            .header("anthropic-version", "2023-06-01")
+                            .json(body)
+                            .send()
+                            .await?;
+                        return Ok(resp2);
+                    }
+                }
+            }
+        }
+        Ok(resp)
     }
 }
 
@@ -183,17 +237,16 @@ async fn non_streaming(
     }
 
     let resp = provider
-        .client
-        .post(format!("{}/v1/messages", provider.base_url))
-        .header("x-api-key", &provider.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
+        .send_with_refresh(
+            &format!("{}/v1/messages", provider.base_url),
+            &body,
+        )
         .await?;
 
     if !resp.status().is_success() {
+        let status = resp.status().as_u16();
         let text = resp.text().await?;
-        anyhow::bail!("Anthropic API error: {}", text);
+        return Err(ProviderError { status_code: status, body: text }.into());
     }
 
     let data: serde_json::Value = resp.json().await?;
@@ -253,17 +306,16 @@ async fn streaming(
     }
 
     let resp = provider
-        .client
-        .post(format!("{}/v1/messages", provider.base_url))
-        .header("x-api-key", &provider.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
+        .send_with_refresh(
+            &format!("{}/v1/messages", provider.base_url),
+            &body,
+        )
         .await?;
 
     if !resp.status().is_success() {
+        let status = resp.status().as_u16();
         let text = resp.text().await?;
-        anyhow::bail!("Anthropic API error: {}", text);
+        return Err(ProviderError { status_code: status, body: text }.into());
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel(100);

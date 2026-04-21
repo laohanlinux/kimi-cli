@@ -254,6 +254,19 @@ impl IdentityManager {
         self.store.get(key_name).await
     }
 
+    /// Refresh a credential through its registered provider.
+    #[allow(dead_code)]
+    pub async fn refresh(&self, credential: &Credential) -> anyhow::Result<Credential> {
+        let provider = self
+            .providers
+            .get(&credential.provider)
+            .ok_or_else(|| anyhow::anyhow!("Unknown identity provider: {}", credential.provider))?;
+        let refreshed = provider.refresh(credential).await?;
+        // Persist the refreshed credential back to the store.
+        let _ = self.store.set(&refreshed.key, &refreshed).await;
+        Ok(refreshed)
+    }
+
     /// Build a default identity manager with env + file stores.
     pub fn default_for_kimi() -> anyhow::Result<Self> {
         let env_store = Box::new(EnvCredentialStore::new(""));
@@ -418,5 +431,48 @@ mod tests {
 
         let key = manager.get_key("my_key").await.unwrap();
         assert!(key.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_identity_manager_refresh_persists_to_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Box::new(FileCredentialStore::new(temp.path()).unwrap());
+        let mut manager = IdentityManager::new(store);
+
+        let provider_store = Box::new(FileCredentialStore::new(temp.path()).unwrap());
+        let provider = Box::new(ApiKeyProvider::new("test", provider_store, "my_key"));
+        manager.register_provider("test", provider);
+
+        // Seed the provider's store with an initial credential
+        let cred = Credential {
+            key: "my_key".to_string(),
+            value: "old_value".to_string(),
+            provider: "test".to_string(),
+            expires_at: None,
+            refresh_token: None,
+        };
+        manager.store.set("my_key", &cred).await.unwrap();
+
+        // Refresh (ApiKeyProvider.refresh re-authenticates from store)
+        let refreshed = manager.refresh(&cred).await.unwrap();
+        assert_eq!(refreshed.value, "old_value");
+
+        // Update the provider's store directly and refresh again
+        let new_cred = Credential {
+            key: "my_key".to_string(),
+            value: "new_value".to_string(),
+            provider: "test".to_string(),
+            expires_at: None,
+            refresh_token: None,
+        };
+        // Write to the same file store path
+        let file_store = FileCredentialStore::new(temp.path()).unwrap();
+        file_store.set("my_key", &new_cred).await.unwrap();
+
+        let refreshed2 = manager.refresh(&cred).await.unwrap();
+        assert_eq!(refreshed2.value, "new_value");
+        // Manager store should also have been updated
+        let stored = manager.store.get("my_key").await.unwrap().unwrap();
+        assert_eq!(stored.value, "new_value");
     }
 }

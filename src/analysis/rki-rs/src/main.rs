@@ -235,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
         ts.register(Box::new(tools::plus_tool()));
         ts.register(Box::new(tools::compare_tool()));
         ts.register(Box::new(tools::panic_tool()));
+        ts.register(Box::new(tools::display_tool()));
         if runtime
             .features
             .is_enabled(rki_rs::feature_flags::ExperimentalFeature::FunctionTools)
@@ -377,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
     let llm: Arc<dyn llm::ChatProvider> = if model == "echo" {
         Arc::new(llm::EchoProvider)
     } else {
-        match llm::create_provider(model, &runtime.identity, Some(session.id.clone())).await {
+        match llm::create_provider(model, Arc::clone(&runtime.identity), Some(session.id.clone())).await {
             Ok(p) => Arc::from(p),
             Err(e) => {
                 eprintln!(

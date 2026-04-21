@@ -95,8 +95,12 @@ impl NotificationManager {
     /// Returns only notifications that are not already claimed by this
     /// consumer. Creates claim records so subsequent calls for the same
     /// consumer will not re-deliver until acked.
+    /// Claim pending notifications for a sink with exactly-once semantics.
+    ///
+    /// Batch size aligns with Python kimi-cli (§1.2 L20): up to 4 pending
+    /// notifications are injected into the LLM context per step.
     pub async fn claim(&self, sink: &str) -> Vec<NotificationEvent> {
-        match self.store.claim_notifications(&self.session_id, sink, 100) {
+        match self.store.claim_notifications(&self.session_id, sink, 4) {
             Ok(rows) => rows
                 .into_iter()
                 .map(notification_event_from_record)
@@ -341,8 +345,14 @@ mod tests {
             assert!(id.is_some());
         }
 
+        // Batch size is 4 (Python parity §1.2 L20)
         let claimed = mgr.claim("llm").await;
-        assert_eq!(claimed.len(), 5);
+        assert_eq!(claimed.len(), 4);
+
+        // Remaining 1 event delivered on next claim
+        let claimed2 = mgr.claim("llm").await;
+        assert_eq!(claimed2.len(), 1);
+        assert_eq!(claimed2[0].kind, "evt-4");
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use crate::llm::{ChatProvider, HttpGeneration, StreamingGeneration};
+use crate::llm::{ChatProvider, HttpGeneration, ProviderError, StreamingGeneration};
 use crate::message::{
     ContentPart, FunctionCall, Message, ToolCall, UserMessage, content_to_string,
 };
@@ -9,27 +9,79 @@ use reqwest::Client;
 
 pub struct OpenAIProvider {
     client: Client,
-    api_key: String,
+    api_key: std::sync::Mutex<String>,
     base_url: String,
     model: String,
     /// Session affinity key for prompt caching (Kimi-specific).
     session_id: Option<String>,
+    identity: Option<std::sync::Arc<crate::identity::IdentityManager>>,
+    key_name: String,
 }
 
 impl OpenAIProvider {
     pub fn new(api_key: String, base_url: String, model: String) -> Self {
         Self {
             client: Client::new(),
-            api_key,
+            api_key: std::sync::Mutex::new(api_key),
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
             session_id: None,
+            identity: None,
+            key_name: String::new(),
         }
     }
 
     pub fn with_session_id(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
         self
+    }
+
+    pub fn with_identity(
+        mut self,
+        identity: std::sync::Arc<crate::identity::IdentityManager>,
+        key_name: String,
+    ) -> Self {
+        self.identity = Some(identity);
+        self.key_name = key_name;
+        self
+    }
+
+    /// Send a request, refreshing the token once on 401 if identity is configured.
+    async fn send_with_refresh(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<reqwest::Response> {
+        let key = self.api_key.lock().unwrap().clone();
+        let resp = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", key))
+            .json(body)
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 401 {
+            if let Some(ref identity) = self.identity {
+                if let Ok(Some(cred)) = identity.get_key(&self.key_name).await {
+                    if let Ok(new_cred) = identity.refresh(&cred).await {
+                        {
+                            let mut api_key = self.api_key.lock().unwrap();
+                            *api_key = new_cred.value.clone();
+                        }
+                        let resp2 = self
+                            .client
+                            .post(url)
+                            .header("Authorization", format!("Bearer {}", new_cred.value))
+                            .json(body)
+                            .send()
+                            .await?;
+                        return Ok(resp2);
+                    }
+                }
+            }
+        }
+        Ok(resp)
     }
 }
 
@@ -165,16 +217,16 @@ async fn non_streaming(
     }
 
     let resp = provider
-        .client
-        .post(format!("{}/v1/chat/completions", provider.base_url))
-        .header("Authorization", format!("Bearer {}", provider.api_key))
-        .json(&body)
-        .send()
+        .send_with_refresh(
+            &format!("{}/v1/chat/completions", provider.base_url),
+            &body,
+        )
         .await?;
 
     if !resp.status().is_success() {
+        let status = resp.status().as_u16();
         let text = resp.text().await?;
-        anyhow::bail!("OpenAI API error: {}", text);
+        return Err(ProviderError { status_code: status, body: text }.into());
     }
 
     let data: serde_json::Value = resp.json().await?;
@@ -230,16 +282,16 @@ async fn streaming(
     }
 
     let resp = provider
-        .client
-        .post(format!("{}/v1/chat/completions", provider.base_url))
-        .header("Authorization", format!("Bearer {}", provider.api_key))
-        .json(&body)
-        .send()
+        .send_with_refresh(
+            &format!("{}/v1/chat/completions", provider.base_url),
+            &body,
+        )
         .await?;
 
     if !resp.status().is_success() {
+        let status = resp.status().as_u16();
         let text = resp.text().await?;
-        anyhow::bail!("OpenAI API error: {}", text);
+        return Err(ProviderError { status_code: status, body: text }.into());
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -274,7 +326,9 @@ async fn streaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::CredentialStore;
     use crate::message::{ContentBlock, ToolEvent, ToolStatus};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_build_messages_with_system_prompt() {
@@ -355,4 +409,104 @@ mod tests {
         assert_eq!(arr[0]["type"], "text");
         assert_eq!(arr[1]["type"], "image_url");
     }
+
+    #[tokio::test]
+    async fn test_openai_provider_401_without_identity_returns_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let provider = OpenAIProvider::new(
+            "bad_key".to_string(),
+            format!("http://127.0.0.1:{}", port),
+            "gpt-4".to_string(),
+        );
+        let result = provider.generate(None, vec![], vec![]).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        let pe = err.downcast_ref::<ProviderError>();
+        assert!(pe.is_some(), "Expected ProviderError, got: {}", err);
+        assert_eq!(pe.unwrap().status_code, 401);
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_401_with_identity_refreshes_and_retries() {
+        use crate::identity::{ApiKeyProvider, Credential, FileCredentialStore, IdentityManager};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            // First request: 401
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes()).await;
+
+            // Second request (after refresh): 200 with valid completion
+            let (mut stream2, _) = listener.accept().await.unwrap();
+            let mut buf2 = [0u8; 4096];
+            let _ = stream2.read(&mut buf2).await;
+            let body = r#"{"choices":[{"delta":{"content":"hello"}}]}"#;
+            let response2 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {}\n\ndata: [DONE]\n\n",
+                body
+            );
+            let _ = stream2.write_all(response2.as_bytes()).await;
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared_store = FileCredentialStore::new(temp.path()).unwrap();
+        let mut manager = IdentityManager::new(Box::new(FileCredentialStore::new(temp.path()).unwrap()));
+
+        let api_provider = ApiKeyProvider::new("test", Box::new(FileCredentialStore::new(temp.path()).unwrap()), "OPENAI_API_KEY");
+        manager.register_provider("test", Box::new(api_provider));
+
+        // Seed the shared store with old and new keys
+        let cred = Credential {
+            key: "OPENAI_API_KEY".to_string(),
+            value: "old_key".to_string(),
+            provider: "test".to_string(),
+            expires_at: None,
+            refresh_token: None,
+        };
+        shared_store.set("OPENAI_API_KEY", &cred).await.unwrap();
+        let refreshed = Credential {
+            key: "OPENAI_API_KEY".to_string(),
+            value: "new_key".to_string(),
+            provider: "test".to_string(),
+            expires_at: None,
+            refresh_token: None,
+        };
+        shared_store.set("OPENAI_API_KEY", &refreshed).await.unwrap();
+
+        let provider = OpenAIProvider::new(
+            "old_key".to_string(),
+            format!("http://127.0.0.1:{}", port),
+            "gpt-4".to_string(),
+        )
+        .with_identity(std::sync::Arc::new(manager), "OPENAI_API_KEY".to_string());
+
+        let result = provider.generate(None, vec![], vec![]).await;
+        assert!(result.is_ok(), "Expected success after refresh+retry");
+        let mut generation = result.ok().unwrap();
+        let chunk = generation.next_chunk().await;
+        assert_eq!(
+            chunk,
+            Some(ContentPart::Text {
+                text: "hello".to_string()
+            })
+        );
+    }
+
+
+
 }

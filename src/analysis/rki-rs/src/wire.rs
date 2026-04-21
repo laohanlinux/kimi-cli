@@ -704,6 +704,123 @@ mod tests {
             "{back:?}"
         );
     }
+
+    #[tokio::test]
+    async fn test_wire_merged_receiver_alternating_types() {
+        let wire = Wire::new(1024);
+        let raw_rx = wire.subscribe();
+        let mut merged = MergedWireReceiver::new(raw_rx);
+
+        wire.send(WireEvent::TextPart { text: "A".into() });
+        wire.send(WireEvent::ThinkPart { text: "B".into() });
+        wire.send(WireEvent::TextPart { text: "C".into() });
+        drop(wire);
+
+        // TextPart → ThinkPart flushes buffered TextPart
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TextPart { text } if text == "A"));
+
+        // ThinkPart → TextPart flushes buffered ThinkPart
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::ThinkPart { text } if text == "B"));
+
+        // Final TextPart flushed on channel close
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TextPart { text } if text == "C"));
+    }
+
+    #[tokio::test]
+    async fn test_wire_merged_receiver_empty_text() {
+        let wire = Wire::new(1024);
+        let raw_rx = wire.subscribe();
+        let mut merged = MergedWireReceiver::new(raw_rx);
+
+        wire.send(WireEvent::TextPart { text: "".into() });
+        wire.send(WireEvent::TextPart { text: "x".into() });
+        drop(wire);
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TextPart { text } if text == "x"));
+    }
+
+    #[tokio::test]
+    async fn test_wire_merged_receiver_multiple_non_mergeable() {
+        let wire = Wire::new(1024);
+        let raw_rx = wire.subscribe();
+        let mut merged = MergedWireReceiver::new(raw_rx);
+
+        wire.send(WireEvent::StepBegin { n: 1 });
+        wire.send(WireEvent::StepBegin { n: 2 });
+        wire.send(WireEvent::TextPart { text: "hi".into() });
+        drop(wire);
+
+        // StepBegin is non-mergeable; each flushes the previous
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::StepBegin { n: 1 }));
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::StepBegin { n: 2 }));
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TextPart { text } if text == "hi"));
+    }
+
+    #[tokio::test]
+    async fn test_wire_merged_receiver_large_buffer_accumulation() {
+        let wire = Wire::new(1024);
+        let raw_rx = wire.subscribe();
+        let mut merged = MergedWireReceiver::new(raw_rx);
+
+        for i in 0..100 {
+            wire.send(WireEvent::TextPart { text: format!("{}", i) });
+        }
+        drop(wire);
+
+        let ev = merged.recv().await.unwrap();
+        assert!(
+            matches!(ev.event, WireEvent::TextPart { text } if text == (0..100).map(|i| i.to_string()).collect::<String>())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wire_merged_receiver_long_mixed_sequence() {
+        let wire = Wire::new(1024);
+        let raw_rx = wire.subscribe();
+        let mut merged = MergedWireReceiver::new(raw_rx);
+
+        wire.send(WireEvent::TextPart { text: "a".into() });
+        wire.send(WireEvent::TextPart { text: "b".into() });
+        wire.send(WireEvent::ThinkPart { text: "c".into() });
+        wire.send(WireEvent::ThinkPart { text: "d".into() });
+        wire.send(WireEvent::TextPart { text: "e".into() });
+        drop(wire);
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TextPart { text } if text == "ab"));
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::ThinkPart { text } if text == "cd"));
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TextPart { text } if text == "e"));
+    }
+
+    #[tokio::test]
+    async fn test_wire_merged_receiver_empty_text_flushed_by_non_mergeable() {
+        let wire = Wire::new(1024);
+        let raw_rx = wire.subscribe();
+        let mut merged = MergedWireReceiver::new(raw_rx);
+
+        wire.send(WireEvent::TextPart { text: "".into() });
+        wire.send(WireEvent::TurnEnd);
+        drop(wire);
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TextPart { text } if text.is_empty()));
+
+        let ev = merged.recv().await.unwrap();
+        assert!(matches!(ev.event, WireEvent::TurnEnd));
+    }
 }
 
 #[derive(Clone)]
