@@ -96,41 +96,35 @@ impl Config {
         {
             self.default_model = val;
         }
-        if let Ok(val) = std::env::var("KIMI_MAX_STEPS") {
-            if let Ok(n) = val.parse::<usize>() {
+        if let Ok(val) = std::env::var("KIMI_MAX_STEPS")
+            && let Ok(n) = val.parse::<usize>() {
                 self.max_steps_per_turn = Some(n);
             }
-        }
-        if let Ok(val) = std::env::var("KIMI_MAX_CONTEXT_SIZE") {
-            if let Ok(n) = val.parse::<usize>() {
+        if let Ok(val) = std::env::var("KIMI_MAX_CONTEXT_SIZE")
+            && let Ok(n) = val.parse::<usize>() {
                 self.max_context_size = Some(n);
             }
-        }
         if let Ok(val) = std::env::var("KIMI_ORCHESTRATOR")
             && !val.is_empty()
         {
             self.default_orchestrator = val;
         }
-        if let Ok(val) = std::env::var("KIMI_RALPH_MAX_ITERATIONS") {
-            if let Ok(n) = val.parse::<usize>() {
+        if let Ok(val) = std::env::var("KIMI_RALPH_MAX_ITERATIONS")
+            && let Ok(n) = val.parse::<usize>() {
                 self.ralph_max_iterations = n;
             }
-        }
-        if let Ok(val) = std::env::var("KIMI_COMPACTION_THRESHOLD_PERCENT") {
-            if let Ok(f) = val.parse::<f64>() {
+        if let Ok(val) = std::env::var("KIMI_COMPACTION_THRESHOLD_PERCENT")
+            && let Ok(f) = val.parse::<f64>() {
                 self.compaction_threshold_percent = f.clamp(0.0, 1.0);
             }
-        }
-        if let Ok(val) = std::env::var("KIMI_COMPACTION_THRESHOLD_ABSOLUTE") {
-            if let Ok(n) = val.parse::<usize>() {
+        if let Ok(val) = std::env::var("KIMI_COMPACTION_THRESHOLD_ABSOLUTE")
+            && let Ok(n) = val.parse::<usize>() {
                 self.compaction_threshold_absolute = n;
             }
-        }
-        if let Ok(val) = std::env::var("KIMI_COMPACTION_MIN_MESSAGES") {
-            if let Ok(n) = val.parse::<usize>() {
+        if let Ok(val) = std::env::var("KIMI_COMPACTION_MIN_MESSAGES")
+            && let Ok(n) = val.parse::<usize>() {
                 self.compaction_min_messages = n;
             }
-        }
         if let Ok(val) = std::env::var("KIMI_SUPPORTS_VISION") {
             let v = val.trim().to_ascii_lowercase();
             if v == "0" || v == "false" || v == "no" {

@@ -33,7 +33,11 @@ async fn main() -> anyhow::Result<()> {
         std::env::current_dir()?
     };
 
-    let config_path = kimi_home().join("config.toml");
+    let config_path = if let Some(ref cp) = args.config {
+        cp.clone()
+    } else {
+        kimi_home().join("config.toml")
+    };
     // Use ConfigRegistry as the single config loading path (§8.1)
     let registry = config_registry::parse_config_file(&config_path)?;
     let mut config = registry.to_legacy_config();
@@ -63,11 +67,17 @@ async fn main() -> anyhow::Result<()> {
         if sessions.is_empty() {
             println!("No sessions found.");
         } else {
-            println!("{:<36} {:<20} Work Dir", "Session ID", "Created");
-            for (id, work_dir, created_at) in sessions {
-                println!("{:<36} {:<20} {}", id, created_at, work_dir);
+            println!("{:<36} {:<20} {:<30} Work Dir", "Session ID", "Created", "Title");
+            for (id, work_dir, created_at, title) in sessions {
+                let title_display = title.as_deref().unwrap_or("Untitled");
+                println!("{:<36} {:<20} {:<30} {}", id, created_at, title_display, work_dir);
             }
         }
+        return Ok(());
+    }
+
+    if let Some(ref session_id) = args.export_session {
+        store.export_session_to_jsonl(session_id, &mut std::io::stdout())?;
         return Ok(());
     }
 
@@ -118,11 +128,10 @@ async fn main() -> anyhow::Result<()> {
         features,
     );
     // Load MCP server configs from registry (§1.2 L08)
-    if let Ok(registry) = config_registry::parse_config_file(&config_path) {
-        if let Some(mcp_sec) = registry.get_section::<config_registry::MCPSection>() {
+    if let Ok(registry) = config_registry::parse_config_file(&config_path)
+        && let Some(mcp_sec) = registry.get_section::<config_registry::MCPSection>() {
             runtime.set_mcp_servers(mcp_sec.servers.clone());
         }
-    }
     let _ = runtime.bg_manager.recover().await;
 
     // CLI mode overrides: plan mode and Ralph mode (§1.2 bootstrap flags)

@@ -14,7 +14,6 @@ use tracing::debug;
 
 mod loader;
 
-pub use loader::ThemeLoader;
 
 /// Load syntect theme sets lazily
 static THEME_SET: std::sync::LazyLock<ThemeSet> = std::sync::LazyLock::new(ThemeSet::load_defaults);

@@ -104,7 +104,7 @@ impl SideEffectEngine {
         let results = futures::future::join_all(handles).await;
         let aggregate = SideEffectResult::allow();
 
-        for (effect, result) in effects.iter().zip(results.into_iter()) {
+        for (effect, result) in effects.iter().zip(results) {
             match result {
                 Ok(res) => {
                     if let EffectDecision::Block { reason } = &res.decision {

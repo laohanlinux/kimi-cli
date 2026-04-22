@@ -1,0 +1,21 @@
+name = "gruvbox-dark"
+
+[palette]
+background = "#282828"
+foreground = "#ebdbb2"
+red = "#cc241d"
+green = "#98971a"
+yellow = "#d79921"
+blue = "#458588"
+magenta = "#b16286"
+cyan = "#689d6a"
+
+[components]
+status_bar = { fg = "foreground", bg = "background" }
+error_text = { fg = "red" }
+assistant_message = { fg = "foreground" }
+user_message = { fg = "foreground" }
+input_panel_border = { fg = "yellow" }
+input_panel_background = { bg = "background" }
+chat_list_border = { fg = "foreground" }
+selection_highlight = { fg = "yellow" }

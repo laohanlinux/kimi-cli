@@ -223,4 +223,24 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "command"));
     }
+
+    #[tokio::test]
+    async fn test_shell_run_in_background_submits_task() {
+        let ctx = test_ctx();
+        let tool = ShellTool;
+        let args = serde_json::json!({
+            "command": "echo hello",
+            "run_in_background": true
+        });
+        let output = tool.call(args, &ctx).await.unwrap();
+        assert_eq!(output.result.r#type, "success");
+        assert!(
+            output.result.summary.contains("Background") || output.result.summary.contains("background"),
+            "expected background task summary, got: {}",
+            output.result.summary
+        );
+        // Verify task was actually submitted
+        let tasks = ctx.runtime.bg_manager.list().await;
+        assert!(!tasks.is_empty(), "expected at least one background task");
+    }
 }

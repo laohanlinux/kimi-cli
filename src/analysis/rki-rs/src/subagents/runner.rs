@@ -92,8 +92,8 @@ impl ForegroundSubagentRunner {
                                 } else {
                                     envelope
                                 };
-                                if persist_subagent_wire {
-                                    if let Err(e) = sa_store_fwd
+                                if persist_subagent_wire
+                                    && let Err(e) = sa_store_fwd
                                         .append_wire_envelope(&agent_id_fwd, &envelope)
                                         .await
                                     {
@@ -102,7 +102,6 @@ impl ForegroundSubagentRunner {
                                             "SubagentStore::append_wire_envelope failed"
                                         );
                                     }
-                                }
                                 parent_hub_fwd.broadcast_envelope(envelope);
                             }
                             Err(RecvError::Lagged(_)) => continue,
@@ -119,8 +118,8 @@ impl ForegroundSubagentRunner {
                             } else {
                                 envelope
                             };
-                            if persist_subagent_wire {
-                                if let Err(e) = sa_store_fwd
+                            if persist_subagent_wire
+                                && let Err(e) = sa_store_fwd
                                     .append_wire_envelope(&agent_id_fwd, &envelope)
                                     .await
                                 {
@@ -129,7 +128,6 @@ impl ForegroundSubagentRunner {
                                         "SubagentStore::append_wire_envelope failed (drain)"
                                     );
                                 }
-                            }
                             parent_hub_fwd.broadcast_envelope(envelope);
                         }
                         break;
@@ -261,13 +259,12 @@ mod tests {
         let rows = rt.store.get_wire_events(&sid).unwrap();
         let mut saw_subagent_envelope = false;
         for (_, _etype, payload) in rows {
-            if let Ok(env) = serde_json::from_str::<WireEnvelope>(&payload) {
-                if matches!(env.source.source_type, SourceType::Subagent) {
+            if let Ok(env) = serde_json::from_str::<WireEnvelope>(&payload)
+                && matches!(env.source.source_type, SourceType::Subagent) {
                     saw_subagent_envelope = true;
                     assert!(!env.event_id.is_empty());
                     break;
                 }
-            }
         }
         assert!(
             saw_subagent_envelope,

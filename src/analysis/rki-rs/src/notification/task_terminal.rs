@@ -80,11 +80,10 @@ pub fn build_background_task_notification(
         body_lines.push(format!("Terminal reason: {terminal_reason}"));
     }
     match &task.status {
-        TaskStatus::Completed { exit_code } => {
-            if let Some(c) = exit_code {
-                body_lines.push(format!("Exit code: {c}"));
-            }
+        TaskStatus::Completed { exit_code: Some(c) } => {
+            body_lines.push(format!("Exit code: {c}"));
         }
+        TaskStatus::Completed { exit_code: None } => {}
         TaskStatus::Failed { reason } => {
             body_lines.push(format!("Failure reason: {reason}"));
         }

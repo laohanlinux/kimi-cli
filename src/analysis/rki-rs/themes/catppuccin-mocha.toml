@@ -1,0 +1,21 @@
+name = "catppuccin-mocha"
+
+[palette]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+red = "#f38ba8"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+blue = "#89b4fa"
+magenta = "#cba6f7"
+cyan = "#74c7ec"
+
+[components]
+status_bar = { fg = "foreground", bg = "background" }
+error_text = { fg = "red" }
+assistant_message = { fg = "foreground" }
+user_message = { fg = "foreground" }
+input_panel_border = { fg = "blue" }
+input_panel_background = { bg = "background" }
+chat_list_border = { fg = "foreground" }
+selection_highlight = { fg = "yellow" }

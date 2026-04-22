@@ -90,8 +90,7 @@ pub async fn build_notification_message_for_llm(
     if notif.category == "task"
         && notif.source_kind == "background_task"
         && !notif.source_id.is_empty()
-    {
-        if let Some(mgr) = bg {
+        && let Some(mgr) = bg {
             let tasks = mgr.list().await;
             if let Some(t) = tasks.iter().find(|t| t.id == notif.source_id) {
                 let kind_label = match &t.spec.kind {
@@ -110,10 +109,10 @@ pub async fn build_notification_message_for_llm(
                     format!("Status: {}", format_task_status(&t.status)),
                 ];
                 match &t.status {
-                    TaskStatus::Completed { exit_code } => {
-                        if let Some(c) = exit_code {
-                            task_lines.push(format!("Exit code: {c}"));
-                        }
+                    TaskStatus::Completed {
+                        exit_code: Some(c),
+                    } => {
+                        task_lines.push(format!("Exit code: {c}"));
                     }
                     TaskStatus::Failed { reason } => {
                         task_lines.push(format!("Failure reason: {reason}"));
@@ -131,7 +130,6 @@ pub async fn build_notification_message_for_llm(
                 lines.extend(task_lines);
             }
         }
-    }
 
     lines.push("</notification>".to_string());
     lines.join("\n")

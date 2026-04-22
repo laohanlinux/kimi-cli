@@ -118,33 +118,28 @@ fn parse_turn_from_value(v: &serde_json::Value) -> anyhow::Result<TurnInput> {
         }
         return Ok(TurnInput::new(parts));
     }
-    if let Some(parts_v) = v.get("parts") {
-        if let Some(arr) = parts_v.as_array() {
-            if !arr.is_empty() {
+    if let Some(parts_v) = v.get("parts")
+        && let Some(arr) = parts_v.as_array()
+            && !arr.is_empty() {
                 let parts: Vec<ContentPart> = serde_json::from_value(parts_v.clone())
                     .map_err(|e| anyhow::anyhow!("invalid `parts` field: {e}"))?;
                 return Ok(TurnInput::new(parts));
             }
-        }
-    }
-    if let Some(s) = v.get("text").and_then(|x| x.as_str()) {
-        if !s.is_empty() {
+    if let Some(s) = v.get("text").and_then(|x| x.as_str())
+        && !s.is_empty() {
             return Ok(TurnInput::text(s.to_string()));
         }
-    }
-    if let Some(s) = v.get("content").and_then(|x| x.as_str()) {
-        if v.get("parts").is_none() && !s.is_empty() {
+    if let Some(s) = v.get("content").and_then(|x| x.as_str())
+        && v.get("parts").is_none() && !s.is_empty() {
             return Ok(TurnInput::text(s.to_string()));
         }
-    }
-    if let Ok(m) = serde_json::from_value::<Message>(v.clone()) {
-        if let Message::User(um) = m {
+    if let Ok(m) = serde_json::from_value::<Message>(v.clone())
+        && let Message::User(um) = m {
             let parts = um.into_parts();
             if !parts.is_empty() {
                 return Ok(TurnInput::new(parts));
             }
         }
-    }
     if let Some(inner) = v.get("user") {
         return parse_turn_from_value(inner);
     }

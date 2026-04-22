@@ -123,7 +123,7 @@ impl KimiSoul {
         // §1.2 L16: reject empty or image-like input for text-only models (after slash dispatch).
         let supports_vision = {
             let cfg = self.runtime.config.read().await;
-            crate::user_input::resolve_supports_vision_for_model(&*cfg, &cfg.default_model)
+            crate::user_input::resolve_supports_vision_for_model(&cfg, &cfg.default_model)
         };
         if let Err(rej) =
             crate::user_input::validate_turn_content_parts(&turn.parts, supports_vision)

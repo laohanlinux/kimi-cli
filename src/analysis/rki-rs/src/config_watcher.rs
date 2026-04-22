@@ -448,8 +448,10 @@ max_context_size = 128000
 
     #[test]
     fn test_diff_sections_detects_mcp_fingerprint_change() {
-        let mut old = Config::default();
-        old.mcp_fingerprint = r#"{"servers":{}}"#.to_string();
+        let old = Config {
+            mcp_fingerprint: r#"{"servers":{}}"#.to_string(),
+            ..Default::default()
+        };
         let mut new = old.clone();
         new.mcp_fingerprint =
             r#"{"servers":{"fs":{"command":"npx","args":["-y","mcp"],"env":{}}}}"#.to_string();

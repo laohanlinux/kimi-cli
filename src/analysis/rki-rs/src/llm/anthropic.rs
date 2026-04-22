@@ -62,10 +62,10 @@ impl AnthropicProvider {
             .send()
             .await?;
 
-        if resp.status().as_u16() == 401 {
-            if let Some(ref identity) = self.identity {
-                if let Ok(Some(cred)) = identity.get_key(&self.key_name).await {
-                    if let Ok(new_cred) = identity.refresh(&cred).await {
+        if resp.status().as_u16() == 401
+            && let Some(ref identity) = self.identity
+                && let Ok(Some(cred)) = identity.get_key(&self.key_name).await
+                    && let Ok(new_cred) = identity.refresh(&cred).await {
                         {
                             let mut api_key = self.api_key.lock().unwrap();
                             *api_key = new_cred.value.clone();
@@ -80,9 +80,6 @@ impl AnthropicProvider {
                             .await?;
                         return Ok(resp2);
                     }
-                }
-            }
-        }
         Ok(resp)
     }
 }
@@ -350,7 +347,9 @@ async fn streaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::CredentialStore;
     use crate::message::{ContentBlock, ToolEvent, ToolStatus};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_build_messages_user_and_assistant() {
@@ -413,5 +412,101 @@ mod tests {
         assert_eq!(msgs[0]["content"][0]["type"], "tool_use");
         assert_eq!(msgs[0]["content"][0]["name"], "read_file");
         assert_eq!(msgs[0]["content"][0]["input"]["path"], "/tmp");
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_401_without_identity_returns_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let provider = AnthropicProvider::new(
+            "bad_key".to_string(),
+            format!("http://127.0.0.1:{}", port),
+            "claude-3".to_string(),
+        );
+        let result = provider.generate(None, vec![], vec![]).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        let pe = err.downcast_ref::<crate::llm::ProviderError>();
+        assert!(pe.is_some(), "Expected ProviderError, got: {}", err);
+        assert_eq!(pe.unwrap().status_code, 401);
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_401_with_identity_refreshes_and_retries() {
+        use crate::identity::{ApiKeyProvider, Credential, FileCredentialStore, IdentityManager};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            // First request: 401
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes()).await;
+
+            // Second request (after refresh): 200 with SSE streaming
+            let (mut stream2, _) = listener.accept().await.unwrap();
+            let mut buf2 = [0u8; 4096];
+            let _ = stream2.read(&mut buf2).await;
+            let sse = "event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\nevent: content_block_delta\r\ndata: {\"delta\":{\"text\":\"hello\"}}\r\n\r\nevent: message_stop\r\ndata: {}\r\n\r\n";
+            let response2 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{}",
+                sse
+            );
+            let _ = stream2.write_all(response2.as_bytes()).await;
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared_store = FileCredentialStore::new(temp.path()).unwrap();
+        let mut manager = IdentityManager::new(Box::new(FileCredentialStore::new(temp.path()).unwrap()));
+
+        let api_provider = ApiKeyProvider::new("test", Box::new(FileCredentialStore::new(temp.path()).unwrap()), "ANTHROPIC_API_KEY");
+        manager.register_provider("test", Box::new(api_provider));
+
+        let cred = Credential {
+            key: "ANTHROPIC_API_KEY".to_string(),
+            value: "old_key".to_string(),
+            provider: "test".to_string(),
+            expires_at: None,
+            refresh_token: None,
+        };
+        shared_store.set("ANTHROPIC_API_KEY", &cred).await.unwrap();
+        let refreshed = Credential {
+            key: "ANTHROPIC_API_KEY".to_string(),
+            value: "new_key".to_string(),
+            provider: "test".to_string(),
+            expires_at: None,
+            refresh_token: None,
+        };
+        shared_store.set("ANTHROPIC_API_KEY", &refreshed).await.unwrap();
+
+        let provider = AnthropicProvider::new(
+            "old_key".to_string(),
+            format!("http://127.0.0.1:{}", port),
+            "claude-3".to_string(),
+        )
+        .with_identity(std::sync::Arc::new(manager), "ANTHROPIC_API_KEY".to_string());
+
+        let result = provider.generate(None, vec![], vec![]).await;
+        assert!(result.is_ok(), "Expected success after refresh+retry");
+        let mut generation = result.ok().unwrap();
+        let chunk = generation.next_chunk().await;
+        assert_eq!(
+            chunk,
+            Some(ContentPart::Text {
+                text: "hello".to_string()
+            })
+        );
     }
 }

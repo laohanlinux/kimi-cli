@@ -413,13 +413,11 @@ impl SemanticMemory {
                         self.fragments.iter().map(|f| f.fact.clone()).collect();
                     let fvs = prov.embed_batch(&facts);
                     for (i, fv) in fvs.into_iter().enumerate() {
-                        if fv.len() == qv.len() {
-                            if let Some(c) = embedding::cosine_similarity(&qv, &fv) {
-                                if c > 0.0 {
+                        if fv.len() == qv.len()
+                            && let Some(c) = embedding::cosine_similarity(&qv, &fv)
+                                && c > 0.0 {
                                     *scores.entry(i).or_default() += c * EMBED_WEIGHT;
                                 }
-                            }
-                        }
                     }
                 }
             } else {

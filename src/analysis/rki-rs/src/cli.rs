@@ -20,6 +20,7 @@ Config file ([models]): supports_vision, ignore_vision_model_hint (see config_re
 #[derive(Parser, Debug)]
 #[command(name = "rki")]
 #[command(about = "Rust Kimi CLI Agent")]
+#[command(version)]
 #[command(after_help = AFTER_HELP)]
 pub struct Cli {
     #[arg(long, help = "Resume the latest session")]
@@ -75,6 +76,12 @@ pub struct Cli {
     /// With `--fork-from`, copy only `context_entries` rows with id ≤ this value (omit for full copy).
     #[arg(long, value_name = "ROW_ID", requires = "fork_from")]
     pub fork_context_up_to_id: Option<i64>,
+    /// Path to a custom config TOML file (default: ~/.kimi/config.toml).
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<std::path::PathBuf>,
+    /// Export a session (by id) to stdout as JSON lines and exit.
+    #[arg(long, value_name = "SESSION_ID", conflicts_with = "list_sessions")]
+    pub export_session: Option<String>,
 }
 
 #[cfg(test)]

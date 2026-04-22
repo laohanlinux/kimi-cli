@@ -331,7 +331,16 @@ impl ReActOrchestrator {
             };
             merge_adjacent_user_messages(h)
         };
-        let system_prompt = Some(agent.system_prompt.clone());
+        // L10: context _system_prompt overrides agent system_prompt if present
+        let system_prompt = {
+            let ctx_sp = history
+                .iter()
+                .find_map(|m| match m {
+                    Message::SystemPrompt { content } => Some(content.clone()),
+                    _ => None,
+                });
+            Some(ctx_sp.unwrap_or_else(|| agent.system_prompt.clone()))
+        };
         let mut tools = runtime.toolset.read().await.schemas();
         apply_function_tool_schema_tags(&runtime.features, &mut tools);
 
@@ -471,8 +480,7 @@ impl ReActOrchestrator {
                     if runtime
                         .features
                         .is_enabled(ExperimentalFeature::StructuredEffects)
-                    {
-                        if let crate::hooks::EffectDecision::Block { reason } = &pre_exec.decision {
+                        && let crate::hooks::EffectDecision::Block { reason } = &pre_exec.decision {
                             hub.broadcast(WireEvent::ToolResult {
                                 tool_call_id: tc.id.clone(),
                                 output: format!("Blocked by hook: {}", reason),
@@ -499,7 +507,6 @@ impl ReActOrchestrator {
                                 }),
                             });
                         }
-                    }
 
                     let toolset = runtime.toolset.read().await;
                     let tool_ctx = ToolContext {
@@ -702,9 +709,17 @@ impl TurnOrchestrator for PlanModeOrchestrator {
         let user_msg = Message::User(UserMessage::from_parts(turn.parts.clone()));
         ctx.append(user_msg).await?;
         let history = merge_adjacent_user_messages(ctx.history());
+        // L10: context _system_prompt overrides agent system_prompt if present
+        let base_prompt = history
+            .iter()
+            .find_map(|m| match m {
+                Message::SystemPrompt { content } => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| agent.system_prompt.clone());
         let system_prompt = Some(format!(
             "{}\n\n[PLAN MODE] You are in read-only research mode. Do not use tools. Think step by step and present a plan.",
-            agent.system_prompt
+            base_prompt
         ));
         drop(ctx);
 
@@ -998,6 +1013,25 @@ mod tests {
         }
     }
 
+    /// Captures the `system_prompt` passed into `generate` (for L10 precedence tests).
+    struct SystemPromptCapture {
+        captured: Arc<tokio::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl ChatProvider for SystemPromptCapture {
+        async fn generate(
+            &self,
+            system_prompt: Option<String>,
+            history: Vec<Message>,
+            tools: Vec<serde_json::Value>,
+        ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+            *self.captured.lock().await = system_prompt;
+            let echo = EchoProvider;
+            echo.generate(None, history, tools).await
+        }
+    }
+
     async fn seed_context_for_memory_recall_test(context: &Arc<Mutex<Context>>) {
         let mut ctx = context.lock().await;
         ctx.append(Message::User(UserMessage::text(
@@ -1104,6 +1138,58 @@ mod tests {
         assert!(
             joined.contains("Relevant context from memory"),
             "expected recall injection with KIMI_EXPERIMENTAL_MEMORY_HIERARCHY, got {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_system_prompt_override_from_context() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        {
+            let mut ctx = context.lock().await;
+            ctx.append(Message::SystemPrompt {
+                content: "context-system-prompt".to_string(),
+            })
+            .await
+            .unwrap();
+        }
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "agent-default-prompt".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "agent-default-prompt".to_string(),
+        };
+        let captured = Arc::new(tokio::sync::Mutex::new(None));
+        let llm: Arc<dyn ChatProvider> = Arc::new(SystemPromptCapture {
+            captured: captured.clone(),
+        });
+        let hub = RootWireHub::new();
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
+
+        let sp = captured.lock().await;
+        assert_eq!(
+            sp.as_deref(),
+            Some("context-system-prompt"),
+            "context _system_prompt should override agent.system_prompt"
         );
     }
 
@@ -1410,6 +1496,64 @@ mod tests {
             "StatusUpdate.plan_mode should be true after enter_plan_mode tool (§1.2 L26)"
         );
         assert!(runtime.is_plan_mode().await);
+    }
+
+    #[tokio::test]
+    async fn test_status_update_fields_populated() {
+        let runtime = test_runtime();
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec![],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(EchoProvider);
+        let hub = RootWireHub::new();
+        let mut rx = hub.subscribe();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        orch.execute_turn(
+            &agent,
+            context,
+            llm,
+            &runtime,
+            TurnInput::text("hello"),
+            &hub,
+            token,
+        )
+        .await
+        .unwrap();
+
+        let mut saw_status = false;
+        while let Ok(envelope) = rx.try_recv() {
+            if let WireEvent::StatusUpdate {
+                token_count,
+                context_size,
+                plan_mode,
+                mcp_status,
+            } = envelope.event
+            {
+                saw_status = true;
+                // token_count should be non-zero after appending messages
+                assert!(token_count > 0, "token_count should be > 0");
+                // context_size should match max_context from config
+                assert_eq!(context_size, 128_000, "context_size should match config max_context");
+                // plan_mode should be false initially
+                assert!(!plan_mode, "plan_mode should be false");
+                // mcp_status should be populated
+                assert!(!mcp_status.is_empty(), "mcp_status should not be empty");
+            }
+        }
+        assert!(saw_status, "Expected at least one StatusUpdate with populated fields");
     }
 
     #[tokio::test]
@@ -1791,8 +1935,7 @@ mod tests {
                 source_kind,
                 ..
             } = &envelope.event
-            {
-                if kind == "wire_tail_ping" {
+                && kind == "wire_tail_ping" {
                     assert!(
                         *created_at > 0.0,
                         "notification created_at should come from SQLite row"
@@ -1802,7 +1945,6 @@ mod tests {
                     saw = true;
                     break;
                 }
-            }
         }
         assert!(
             saw,
@@ -1912,13 +2054,11 @@ mod tests {
             if let WireEvent::Notification {
                 kind, created_at, ..
             } = &envelope.event
-            {
-                if kind == "plan_wire_ping" {
+                && kind == "plan_wire_ping" {
                     assert!(*created_at > 0.0);
                     saw = true;
                     break;
                 }
-            }
         }
         assert!(
             saw,
@@ -2949,5 +3089,80 @@ max_context_size = 256000
             assert_eq!(cfg.max_steps_per_turn, Some(50));
             assert_eq!(cfg.max_context_size, Some(256_000));
         }
+    }
+
+    /// LLM that emits a `think` tool call on EVERY generate (never stops naturally).
+    struct AlwaysThinkCallProvider;
+
+    #[async_trait]
+    impl ChatProvider for AlwaysThinkCallProvider {
+        async fn generate(
+            &self,
+            _system_prompt: Option<String>,
+            _history: Vec<Message>,
+            _tools: Vec<serde_json::Value>,
+        ) -> anyhow::Result<Box<dyn llm::LLMGeneration>> {
+            Ok(Box::new(HttpGeneration::new(
+                vec![ContentPart::Text { text: "thinking".to_string() }],
+                vec![ToolCall {
+                    id: format!("tc-{}", uuid::Uuid::new_v4()),
+                    kind: "function".to_string(),
+                    function: FunctionCall {
+                        name: "think".to_string(),
+                        arguments: r#"{"thought":"hmm"}"#.to_string(),
+                    },
+                }],
+                None,
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_steps_limits_loop() {
+        let features = FeatureFlags::default();
+        // Limit to 3 steps so the test doesn't take too long
+        let runtime = test_runtime_with_features(features);
+        {
+            let mut cfg = runtime.config.write().await;
+            cfg.max_steps_per_turn = Some(3);
+        }
+        {
+            let mut ts = runtime.toolset.write().await;
+            ts.register(Box::new(crate::tools::misc::ThinkTool));
+        }
+
+        let store = runtime.store.clone();
+        let context = Arc::new(Mutex::new(
+            Context::load(&store, &runtime.session.id).await.unwrap(),
+        ));
+        let agent = Agent {
+            spec: AgentSpec {
+                name: "test".to_string(),
+                system_prompt: "test".to_string(),
+                tools: vec!["think".to_string()],
+                capabilities: vec![],
+                ..Default::default()
+            },
+            system_prompt: "test".to_string(),
+        };
+        let llm: Arc<dyn ChatProvider> = Arc::new(AlwaysThinkCallProvider);
+        let hub = RootWireHub::new();
+
+        let orch = ReActOrchestrator;
+        let token = ContextToken::new(runtime.session.id.clone(), "test-turn");
+        let result = orch
+            .execute_turn(
+                &agent,
+                context,
+                llm,
+                &runtime,
+                TurnInput::text("loop forever"),
+                &hub,
+                token,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().stop_reason, "max_steps", "Should stop at max_steps limit");
     }
 }

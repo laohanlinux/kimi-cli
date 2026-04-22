@@ -30,6 +30,7 @@ pub struct RawAgentSpec {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct AgentSpec {
     pub name: String,
     pub system_prompt: String,
@@ -38,17 +39,6 @@ pub struct AgentSpec {
     pub subagents: HashMap<String, SubagentEntry>,
 }
 
-impl Default for AgentSpec {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            system_prompt: String::new(),
-            tools: vec![],
-            capabilities: vec![],
-            subagents: HashMap::new(),
-        }
-    }
-}
 
 impl AgentSpec {
     /// Load an agent spec from YAML, resolving the `extend` inheritance chain.

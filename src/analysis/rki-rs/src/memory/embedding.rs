@@ -44,10 +44,10 @@ impl EmbeddingProvider for HashEmbeddingProvider {
         let mut h = DefaultHasher::new();
         text.hash(&mut h);
         let mut s = h.finish();
-        for i in 0..self.dim {
+        for (i, vi) in v.iter_mut().enumerate() {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
             let u = (s.wrapping_shr((i % 47) as u32) & 0xffff) as f32;
-            v[i] = (u / 32768.0) - 1.0;
+            *vi = (u / 32768.0) - 1.0;
         }
         let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if n < 1e-6 {
@@ -253,16 +253,14 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             if let Some(v) = self.post_request_value(serde_json::json!({
                 "model": self.model,
                 "input": texts,
-            })) {
-                if let Some(rows) = parse_openai_embedding_batch(&v) {
-                    if rows.len() == texts.len() {
+            }))
+                && let Some(rows) = parse_openai_embedding_batch(&v)
+                    && rows.len() == texts.len() {
                         return rows
                             .into_iter()
                             .map(|r| normalize_to_dim(r, self.dim))
                             .collect();
                     }
-                }
-            }
             tracing::debug!("OpenAI embedding batch failed or length mismatch; per-text fallback");
             return texts.iter().map(|t| self.embed(t)).collect();
         }

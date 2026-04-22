@@ -1,0 +1,21 @@
+name = "dracula"
+
+[palette]
+background = "#282a36"
+foreground = "#f8f8f2"
+red = "#ff5555"
+green = "#50fa7b"
+yellow = "#f1fa8c"
+blue = "#8be9fd"
+magenta = "#ff79c6"
+cyan = "#8be9fd"
+
+[components]
+status_bar = { fg = "foreground", bg = "background" }
+error_text = { fg = "red" }
+assistant_message = { fg = "foreground" }
+user_message = { fg = "foreground" }
+input_panel_border = { fg = "magenta" }
+input_panel_background = { bg = "background" }
+chat_list_border = { fg = "foreground" }
+selection_highlight = { fg = "yellow" }

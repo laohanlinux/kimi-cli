@@ -109,4 +109,51 @@ mod tests {
         let compacted = policy.compact(&history);
         assert_eq!(compacted.len(), 2);
     }
+
+    #[test]
+    fn test_simple_compaction_n_plus_one_triggers_summary() {
+        let policy = SimpleCompaction::new(2);
+        let history = vec![
+            Message::User(UserMessage::text("a")),
+            Message::Assistant {
+                content: Some("b".to_string()),
+                tool_calls: None,
+            },
+            Message::User(UserMessage::text("c")),
+        ];
+        let compacted = policy.compact(&history);
+        assert_eq!(compacted.len(), 3); // summary + 2 preserved
+        assert!(matches!(&compacted[0], Message::System { content } if content.contains("1 messages compacted")));
+        assert!(matches!(&compacted[1], Message::Assistant { .. }));
+        assert!(matches!(&compacted[2], Message::User(u) if u.flatten_for_recall() == "c"));
+    }
+
+    #[test]
+    fn test_simple_compaction_summary_counts_correctly() {
+        let policy = SimpleCompaction::new(3);
+        let history = vec![
+            Message::User(UserMessage::text("1")),
+            Message::Assistant {
+                content: Some("2".to_string()),
+                tool_calls: None,
+            },
+            Message::User(UserMessage::text("3")),
+            Message::Assistant {
+                content: Some("4".to_string()),
+                tool_calls: None,
+            },
+            Message::User(UserMessage::text("5")),
+            Message::Assistant {
+                content: Some("6".to_string()),
+                tool_calls: None,
+            },
+        ];
+        let compacted = policy.compact(&history);
+        assert_eq!(compacted.len(), 4); // summary + 3 preserved
+        if let Message::System { content } = &compacted[0] {
+            assert!(content.contains("3 messages compacted"), "summary should say 3 compacted: {}", content);
+        } else {
+            panic!("first item should be System summary");
+        }
+    }
 }

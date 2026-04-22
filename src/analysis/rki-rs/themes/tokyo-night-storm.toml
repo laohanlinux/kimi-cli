@@ -1,0 +1,21 @@
+name = "tokyo-night-storm"
+
+[palette]
+background = "#24283b"
+foreground = "#a9b1d6"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+
+[components]
+status_bar = { fg = "foreground", bg = "background" }
+error_text = { fg = "red" }
+assistant_message = { fg = "foreground" }
+user_message = { fg = "foreground" }
+input_panel_border = { fg = "blue" }
+input_panel_background = { bg = "background" }
+chat_list_border = { fg = "foreground" }
+selection_highlight = { fg = "yellow" }

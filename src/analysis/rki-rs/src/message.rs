@@ -156,11 +156,11 @@ impl UserMessage {
     pub fn flatten_for_recall(&self) -> String {
         self.0
             .iter()
-            .filter_map(|p| match p {
-                ContentPart::Text { text } | ContentPart::Think { text } => Some(text.as_str()),
+            .map(|p| match p {
+                ContentPart::Text { text } | ContentPart::Think { text } => text.as_str(),
                 ContentPart::ImageUrl { url }
                 | ContentPart::AudioUrl { url }
-                | ContentPart::VideoUrl { url } => Some(url.as_str()),
+                | ContentPart::VideoUrl { url } => url.as_str(),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -172,11 +172,10 @@ impl UserMessage {
 
     /// SQLite row `content` column: plain string for text-only; JSON for multimodal.
     pub(crate) fn to_persistent_string(&self) -> String {
-        if self.0.len() == 1 {
-            if let ContentPart::Text { text } = &self.0[0] {
+        if self.0.len() == 1
+            && let ContentPart::Text { text } = &self.0[0] {
                 return text.clone();
             }
-        }
         serde_json::json!({ "parts": &self.0 }).to_string()
     }
 
@@ -201,13 +200,12 @@ impl Serialize for UserMessage {
         S: Serializer,
     {
         use serde::ser::SerializeStruct;
-        if self.0.len() == 1 {
-            if let ContentPart::Text { text } = &self.0[0] {
+        if self.0.len() == 1
+            && let ContentPart::Text { text } = &self.0[0] {
                 let mut st = serializer.serialize_struct("UserMessage", 1)?;
                 st.serialize_field("content", text)?;
                 return st.end();
             }
-        }
         let mut st = serializer.serialize_struct("UserMessage", 1)?;
         st.serialize_field("parts", &self.0)?;
         st.end()

@@ -8,13 +8,15 @@ use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+type ToolFactory = fn() -> Box<dyn Tool>;
+
 /// Registry of built-in tools addressable by manifest `python_class` / `rust_type` entries.
 /// Maps "module:class" → factory function that produces a `Box<dyn Tool>`.
-static BUILTIN_REGISTRY: OnceLock<HashMap<String, fn() -> Box<dyn Tool>>> = OnceLock::new();
+static BUILTIN_REGISTRY: OnceLock<HashMap<String, ToolFactory>> = OnceLock::new();
 
 /// Initialize the built-in tool registry with known tools.
-fn init_builtin_registry() -> HashMap<String, fn() -> Box<dyn Tool>> {
-    let mut reg: HashMap<String, fn() -> Box<dyn Tool>> = HashMap::new();
+fn init_builtin_registry() -> HashMap<String, ToolFactory> {
+    let mut reg: HashMap<String, ToolFactory> = HashMap::new();
     reg.insert("rki_rs::tools::shell::ShellTool".to_string(), || {
         Box::new(crate::tools::ShellTool)
     });
@@ -68,7 +70,7 @@ fn init_builtin_registry() -> HashMap<String, fn() -> Box<dyn Tool>> {
     reg
 }
 
-fn get_builtin_registry() -> &'static HashMap<String, fn() -> Box<dyn Tool>> {
+fn get_builtin_registry() -> &'static HashMap<String, ToolFactory> {
     BUILTIN_REGISTRY.get_or_init(init_builtin_registry)
 }
 

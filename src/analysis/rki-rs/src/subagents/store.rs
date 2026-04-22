@@ -17,15 +17,15 @@ impl SubagentStore {
         system_prompt: &str,
         prompt: &str,
     ) -> anyhow::Result<()> {
-        self.store.create_subagent(
+        self.store.create_subagent(crate::store::CreateSubagentParams {
             id,
             session_id,
-            None,
-            Some("subagent"),
-            Some(system_prompt),
-            Some(prompt),
-            Some(session_id),
-        )?;
+            parent_tool_call_id: None,
+            agent_type: Some("subagent"),
+            system_prompt: Some(system_prompt),
+            prompt: Some(prompt),
+            parent_session_id: Some(session_id),
+        })?;
         Ok(())
     }
 

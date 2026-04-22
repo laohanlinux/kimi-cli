@@ -24,6 +24,20 @@ pub struct ContextRow {
     pub token_count: Option<i64>,
 }
 
+/// Tuple returned by session list queries: (id, work_dir, created_at, title).
+pub type SessionRow = (String, String, String, Option<String>);
+
+/// Parameters for [`Store::create_subagent`].
+pub struct CreateSubagentParams<'a> {
+    pub id: &'a str,
+    pub session_id: &'a str,
+    pub parent_tool_call_id: Option<&'a str>,
+    pub agent_type: Option<&'a str>,
+    pub system_prompt: Option<&'a str>,
+    pub prompt: Option<&'a str>,
+    pub parent_session_id: Option<&'a str>,
+}
+
 /// One row from [`Store::list_unified_session_events`] (§8.6 read-side unified stream).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UnifiedSessionEvent {
@@ -345,21 +359,35 @@ impl Store {
         rows.collect()
     }
 
-    pub fn list_sessions(&self) -> SqlResult<Vec<(String, String, String)>> {
+    pub fn list_sessions(&self) -> SqlResult<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, work_dir, created_at FROM sessions ORDER BY datetime(created_at) DESC, rowid DESC"
+            "SELECT s.id, s.work_dir, s.created_at, st.data FROM sessions s LEFT JOIN state st ON s.id = st.session_id ORDER BY datetime(s.created_at) DESC, s.rowid DESC"
         )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = stmt.query_map([], |row| {
+            let state_json: Option<String> = row.get(3)?;
+            let title = state_json.and_then(|j| {
+                serde_json::from_str::<serde_json::Value>(&j).ok()
+                    .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            });
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, title))
+        })?;
         rows.collect()
     }
 
-    pub fn list_unarchived_sessions(&self) -> SqlResult<Vec<(String, String, String)>> {
+    pub fn list_unarchived_sessions(&self) -> SqlResult<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, work_dir, created_at FROM sessions WHERE archived = 0 ORDER BY datetime(created_at) DESC, rowid DESC"
+            "SELECT s.id, s.work_dir, s.created_at, st.data FROM sessions s LEFT JOIN state st ON s.id = st.session_id WHERE s.archived = 0 ORDER BY datetime(s.created_at) DESC, s.rowid DESC"
         )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = stmt.query_map([], |row| {
+            let state_json: Option<String> = row.get(3)?;
+            let title = state_json.and_then(|j| {
+                serde_json::from_str::<serde_json::Value>(&j).ok()
+                    .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            });
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, title))
+        })?;
         rows.collect()
     }
 
@@ -493,27 +521,18 @@ impl Store {
         rows.collect()
     }
 
-    pub fn create_subagent(
-        &self,
-        id: &str,
-        session_id: &str,
-        parent_tool_call_id: Option<&str>,
-        agent_type: Option<&str>,
-        system_prompt: Option<&str>,
-        prompt: Option<&str>,
-        parent_session_id: Option<&str>,
-    ) -> SqlResult<()> {
+    pub fn create_subagent(&self, params: CreateSubagentParams<'_>) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO subagents (id, session_id, parent_tool_call_id, agent_type, system_prompt, prompt, created_at, parent_session_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), ?7)",
             params![
-                id,
-                session_id,
-                parent_tool_call_id,
-                agent_type,
-                system_prompt,
-                prompt,
-                parent_session_id
+                params.id,
+                params.session_id,
+                params.parent_tool_call_id,
+                params.agent_type,
+                params.system_prompt,
+                params.prompt,
+                params.parent_session_id
             ],
         )?;
         Ok(())
@@ -1053,6 +1072,42 @@ mod tests {
     }
 
     #[test]
+    fn test_list_sessions_reads_title_from_state() {
+        let store = test_store();
+        store.create_session("s1", "/tmp/wd").unwrap();
+        store.set_state("s1", r#"{"title":"My Session"}"#).unwrap();
+
+        let all = store.list_sessions().unwrap();
+        assert_eq!(all.len(), 1);
+        let (_, _, _, title) = &all[0];
+        assert_eq!(title.as_deref(), Some("My Session"));
+    }
+
+    #[test]
+    fn test_list_sessions_untitled_when_no_state() {
+        let store = test_store();
+        store.create_session("s1", "/tmp/wd").unwrap();
+
+        let all = store.list_sessions().unwrap();
+        assert_eq!(all.len(), 1);
+        let (_, _, _, title) = &all[0];
+        assert_eq!(title.as_deref(), None);
+    }
+
+    #[test]
+    fn test_archive_session_excludes_from_unarchived_list() {
+        let store = test_store();
+        store.create_session("s1", "/tmp").unwrap();
+        store.archive_session("s1").unwrap();
+
+        let unarchived = store.list_unarchived_sessions().unwrap();
+        assert!(unarchived.iter().all(|(id, _, _, _)| id != "s1"));
+
+        let all = store.list_sessions().unwrap();
+        assert!(all.iter().any(|(id, _, _, _)| id == "s1"));
+    }
+
+    #[test]
     fn test_context_entries_roundtrip() {
         let store = test_store();
         store.create_session("s1", "/tmp").unwrap();
@@ -1203,15 +1258,15 @@ mod tests {
         store.create_session("s1", "/tmp").unwrap();
 
         store
-            .create_subagent(
-                "sa1",
-                "s1",
-                Some("tc-1"),
-                Some("coder"),
-                Some("sys"),
-                Some("do x"),
-                Some("s1"),
-            )
+            .create_subagent(CreateSubagentParams {
+                id: "sa1",
+                session_id: "s1",
+                parent_tool_call_id: Some("tc-1"),
+                agent_type: Some("coder"),
+                system_prompt: Some("sys"),
+                prompt: Some("do x"),
+                parent_session_id: Some("s1"),
+            })
             .unwrap();
         let sa = store.get_subagent("sa1").unwrap().unwrap();
         assert_eq!(sa.0, "s1");

@@ -237,16 +237,12 @@ impl BackgroundTaskManager {
                 continue;
             };
             let ev = build_background_task_notification(&task, reason);
-            match runtime.notifications.publish(ev).await {
-                Ok(Some(_)) => {
-                    new_count += 1;
-                    if let Some(lim) = limit {
-                        if new_count >= lim {
-                            break;
-                        }
+            if let Ok(Some(_)) = runtime.notifications.publish(ev).await {
+                new_count += 1;
+                if let Some(lim) = limit
+                    && new_count >= lim {
+                        break;
                     }
-                }
-                _ => {}
             }
         }
     }
@@ -1157,11 +1153,10 @@ mod tests {
         mgr.submit(spec).await.unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
         loop {
-            if let Some(t) = mgr.list().await.into_iter().find(|t| t.id == "slow-bash") {
-                if t.timed_out && matches!(t.status, TaskStatus::Failed { .. }) {
+            if let Some(t) = mgr.list().await.into_iter().find(|t| t.id == "slow-bash")
+                && t.timed_out && matches!(t.status, TaskStatus::Failed { .. }) {
                     return;
                 }
-            }
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "timed out waiting for bash wall-clock timeout"

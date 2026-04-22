@@ -18,7 +18,7 @@ async fn list_one_level(dir: &Path, cap: usize) -> String {
     while let Ok(Some(e)) = rd.next_entry().await {
         names.push(e.file_name().to_string_lossy().into_owned());
     }
-    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.sort_by_key(|a| a.to_lowercase());
     let mut out = String::new();
     for (i, name) in names.into_iter().enumerate() {
         if i >= cap {
@@ -65,7 +65,7 @@ pub async fn format_work_dir_tree(work_dir: &Path, max_depth: u8) -> String {
         let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
         rows.push((name, is_dir));
     }
-    rows.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    rows.sort_by_key(|a| a.0.to_lowercase());
 
     let mut subdirs: Vec<String> = Vec::new();
     for (i, (name, is_dir)) in rows.iter().enumerate() {

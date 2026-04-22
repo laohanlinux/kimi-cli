@@ -1,0 +1,21 @@
+name = "catppuccin-latte"
+
+[palette]
+background = "#eff1f5"
+foreground = "#4c4f69"
+red = "#d20f39"
+green = "#40a02b"
+yellow = "#df8e1d"
+blue = "#1e66f5"
+magenta = "#8839ef"
+cyan = "#179299"
+
+[components]
+status_bar = { fg = "foreground", bg = "background" }
+error_text = { fg = "red" }
+assistant_message = { fg = "foreground" }
+user_message = { fg = "foreground" }
+input_panel_border = { fg = "blue" }
+input_panel_background = { bg = "background" }
+chat_list_border = { fg = "foreground" }
+selection_highlight = { fg = "yellow" }

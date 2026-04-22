@@ -61,10 +61,10 @@ impl OpenAIProvider {
             .send()
             .await?;
 
-        if resp.status().as_u16() == 401 {
-            if let Some(ref identity) = self.identity {
-                if let Ok(Some(cred)) = identity.get_key(&self.key_name).await {
-                    if let Ok(new_cred) = identity.refresh(&cred).await {
+        if resp.status().as_u16() == 401
+            && let Some(ref identity) = self.identity
+                && let Ok(Some(cred)) = identity.get_key(&self.key_name).await
+                    && let Ok(new_cred) = identity.refresh(&cred).await {
                         {
                             let mut api_key = self.api_key.lock().unwrap();
                             *api_key = new_cred.value.clone();
@@ -78,9 +78,6 @@ impl OpenAIProvider {
                             .await?;
                         return Ok(resp2);
                     }
-                }
-            }
-        }
         Ok(resp)
     }
 }
@@ -109,13 +106,11 @@ fn openai_user_content(u: &UserMessage) -> serde_json::Value {
     if blocks.is_empty() {
         return serde_json::Value::String(String::new());
     }
-    if blocks.len() == 1 {
-        if let Some(obj) = blocks[0].as_object() {
-            if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
+    if blocks.len() == 1
+        && let Some(obj) = blocks[0].as_object()
+            && obj.get("type").and_then(|v| v.as_str()) == Some("text") {
                 return blocks[0]["text"].clone();
             }
-        }
-    }
     serde_json::Value::Array(blocks)
 }
 

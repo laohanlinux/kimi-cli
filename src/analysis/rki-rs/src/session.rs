@@ -32,13 +32,13 @@ fn session_base_dir() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory found"))?;
     let base = home.join(".kimi").join("sessions");
     match std::fs::create_dir_all(&base) {
-        Ok(()) => return Ok(base),
+        Ok(()) => Ok(base),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             let tmp = std::env::temp_dir().join("kimi-sessions");
             std::fs::create_dir_all(&tmp)?;
-            return Ok(tmp);
+            Ok(tmp)
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -112,7 +112,7 @@ impl Session {
 
     pub fn discover_latest(store: &Store, work_dir: PathBuf) -> anyhow::Result<Self> {
         let sessions = store.list_unarchived_sessions()?;
-        for (id, wd, _) in sessions {
+        for (id, wd, _, _) in sessions {
             if work_dir_matches(&wd, &work_dir) {
                 let home =
                     dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory found"))?;
@@ -154,11 +154,10 @@ impl Session {
             Self::create_with_parent(store, work_dir, Some(parent_id), max_context_entry_id)?;
         let entries = store.get_context(parent_id)?;
         for row in entries {
-            if let Some(max_id) = max_context_entry_id {
-                if row.id > max_id {
+            if let Some(max_id) = max_context_entry_id
+                && row.id > max_id {
                     continue;
                 }
-            }
             store.append_context(
                 &new_session.id,
                 &row.role,

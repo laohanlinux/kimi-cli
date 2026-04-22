@@ -844,12 +844,11 @@ impl WireRecorder {
 
     /// Append a single envelope as one NDJSON line.
     pub fn record(&self, envelope: &WireEnvelope) {
-        if let Ok(line) = serde_json::to_string(envelope) {
-            if let Ok(mut f) = self.file.lock() {
+        if let Ok(line) = serde_json::to_string(envelope)
+            && let Ok(mut f) = self.file.lock() {
                 use std::io::Write;
                 let _ = writeln!(f, "{}", line);
             }
-        }
     }
 
     /// Flush the underlying file.
@@ -1045,5 +1044,117 @@ mod filtered_tests {
         let path = tmp.path().join("wire.jsonl");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_turn_begin_serde_roundtrip() {
+        let ev = WireEvent::TurnBegin {
+            user_input: UserInput::text_only("hello"),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: WireEvent = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(&back, WireEvent::TurnBegin { user_input } if user_input.text == "hello"),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn test_step_begin_interrupted_serde_roundtrip() {
+        let begin = WireEvent::StepBegin { n: 3 };
+        let s = serde_json::to_string(&begin).unwrap();
+        let back: WireEvent = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, WireEvent::StepBegin { n: 3 }));
+
+        let interrupted = WireEvent::StepInterrupted {
+            reason: "user_cancel".to_string(),
+        };
+        let s2 = serde_json::to_string(&interrupted).unwrap();
+        let back2: WireEvent = serde_json::from_str(&s2).unwrap();
+        assert!(
+            matches!(back2, WireEvent::StepInterrupted { reason } if reason == "user_cancel")
+        );
+    }
+
+    #[test]
+    fn test_compaction_begin_end_serde_roundtrip() {
+        let begin = WireEvent::CompactionBegin;
+        let s = serde_json::to_string(&begin).unwrap();
+        let back: WireEvent = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, WireEvent::CompactionBegin));
+
+        let end = WireEvent::CompactionEnd;
+        let s2 = serde_json::to_string(&end).unwrap();
+        let back2: WireEvent = serde_json::from_str(&s2).unwrap();
+        assert!(matches!(back2, WireEvent::CompactionEnd));
+    }
+
+    #[test]
+    fn test_tool_result_serde_roundtrip() {
+        let ev = WireEvent::ToolResult {
+            tool_call_id: "tc-1".to_string(),
+            output: "result".to_string(),
+            is_error: false,
+            elapsed_ms: Some(42),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: WireEvent = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(&back, WireEvent::ToolResult { tool_call_id, output, is_error, elapsed_ms }
+                if tool_call_id == "tc-1" && output == "result" && !is_error && *elapsed_ms == Some(42)
+            ),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn test_approval_request_response_serde_roundtrip() {
+        let req = WireEvent::ApprovalRequest {
+            id: "ar-1".to_string(),
+            tool_call_id: "tc-1".to_string(),
+            sender: "shell".to_string(),
+            action: "destructive".to_string(),
+            description: "rm -rf /".to_string(),
+            display: "Dangerous command".to_string(),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: WireEvent = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(&back, WireEvent::ApprovalRequest { id, .. } if id == "ar-1"),
+            "{back:?}"
+        );
+
+        let resp = WireEvent::ApprovalResponse {
+            id: "ar-1".to_string(),
+            approved: true,
+            feedback: Some("ok".to_string()),
+        };
+        let s2 = serde_json::to_string(&resp).unwrap();
+        let back2: WireEvent = serde_json::from_str(&s2).unwrap();
+        assert!(
+            matches!(&back2, WireEvent::ApprovalResponse { id, approved, feedback }
+                if id == "ar-1" && *approved && feedback.as_deref() == Some("ok")
+            ),
+            "{back2:?}"
+        );
+    }
+
+    #[test]
+    fn test_tool_call_serde_roundtrip() {
+        let ev = WireEvent::ToolCall {
+            id: "tc-1".to_string(),
+            function: crate::message::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: r#"{"path":"/tmp"}"#.to_string(),
+            },
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: WireEvent = serde_json::from_str(&s).unwrap();
+        assert!(
+            matches!(&back, WireEvent::ToolCall { id, function }
+                if id == "tc-1" && function.name == "read_file"
+            ),
+            "{back:?}"
+        );
     }
 }

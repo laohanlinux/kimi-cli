@@ -631,6 +631,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_glob_tool_rejects_double_star_prefix() {
+        let tool = GlobTool;
+        let args = serde_json::json!({
+            "pattern": "**/*.rs",
+            "directory": "."
+        });
+        let result = tool.call(args, &test_ctx()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("**"));
+    }
+
+    #[tokio::test]
     async fn test_grep_tool() {
         let temp = tempfile::tempdir().unwrap();
         tokio::fs::write(temp.path().join("a.rs"), "fn main() {}\nfn helper() {}")

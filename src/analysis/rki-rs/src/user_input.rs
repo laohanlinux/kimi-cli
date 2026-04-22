@@ -289,9 +289,11 @@ mod tests {
 
     #[test]
     fn test_vision_catalog_by_model_wildcard() {
-        let mut c = Config::default();
-        c.supports_vision = true;
-        c.ignore_vision_model_hint = false;
+        let mut c = Config {
+            supports_vision: true,
+            ignore_vision_model_hint: false,
+            ..Default::default()
+        };
 
         // Exact match still works
         c.vision_by_model.insert("custom-v1".to_string(), true);
@@ -338,8 +340,10 @@ mod tests {
 
     #[test]
     fn test_resolve_supports_vision_ignore_model_hint() {
-        let mut c = Config::default();
-        c.ignore_vision_model_hint = true;
+        let c = Config {
+            ignore_vision_model_hint: true,
+            ..Default::default()
+        };
         assert!(
             resolve_supports_vision(&c),
             "echo allowed when hint ignored"
@@ -348,10 +352,12 @@ mod tests {
 
     #[test]
     fn test_vision_catalog_overrides_model_hint() {
-        let mut c = Config::default();
-        c.supports_vision = true;
-        c.ignore_vision_model_hint = false;
-        c.default_model = "echo".to_string();
+        let mut c = Config {
+            supports_vision: true,
+            ignore_vision_model_hint: false,
+            default_model: "echo".to_string(),
+            ..Default::default()
+        };
         assert!(
             !resolve_supports_vision(&c),
             "echo uses built-in hint off by default"
@@ -365,10 +371,12 @@ mod tests {
 
     #[test]
     fn test_resolve_supports_vision_for_model_independent_of_default_model() {
-        let mut c = Config::default();
-        c.supports_vision = true;
-        c.ignore_vision_model_hint = false;
-        c.default_model = "echo".to_string();
+        let c = Config {
+            supports_vision: true,
+            ignore_vision_model_hint: false,
+            default_model: "echo".to_string(),
+            ..Default::default()
+        };
         assert!(
             !resolve_supports_vision_for_model(&c, "echo"),
             "echo hint off"

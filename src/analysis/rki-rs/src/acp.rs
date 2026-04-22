@@ -484,7 +484,14 @@ mod tests {
             .await
             .unwrap();
         let mut buf = vec![0u8; 1024];
-        let n = client.read(&mut buf).await.unwrap();
+        let mut n = 0;
+        loop {
+            let chunk = client.read(&mut buf[n..]).await.unwrap();
+            if chunk == 0 {
+                break;
+            }
+            n += chunk;
+        }
         let text = String::from_utf8_lossy(&buf[..n]);
         assert!(text.contains("200 OK"), "{text}");
         assert!(text.contains("parse_cli_turn_line"), "{text}");
